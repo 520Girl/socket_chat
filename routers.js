@@ -345,10 +345,111 @@ router.post('/group/send', sendGroupMessage);
 router.get('/group/messages', getGroupMessages);
 
 
+// 获取用户未读消息计数
+const getUnreadMessages = async (req, res) => {
+  const { userId } = req.query;
+
+  if (!userId) {
+    return res.status(400).json({
+      code: 40000,
+      status: 0,
+      msg: '缺少必要参数userId'
+    });
+  }
+
+  try {
+    // 引入optimization.js中的函数
+    const { getUserUnreadMessages } = require('./optimization');
+
+    // 获取用户所有未读消息
+    const unreadMessages = await getUserUnreadMessages(userId);
+
+    return res.status(200).json({
+      code: 20100,
+      status: 1,
+      data: unreadMessages,
+      msg: '获取未读消息成功'
+    });
+  } catch (error) {
+    return res.status(500).json({
+      code: 50000,
+      status: 0,
+      msg: '获取未读消息失败：' + error.message
+    });
+  }
+};
+
+// 标记私聊消息为已读
+const markPrivateRead = async (req, res) => {
+  const { userId, senderId } = req.body;
+
+  if (!userId || !senderId) {
+    return res.status(400).json({
+      code: 40000,
+      status: 0,
+      msg: '缺少必要参数'
+    });
+  }
+
+  try {
+    // 引入optimization.js中的函数
+    const { markPrivateMessagesAsRead } = require('./optimization');
+
+    await markPrivateMessagesAsRead(userId, senderId);
+
+    return res.status(200).json({
+      code: 20100,
+      status: 1,
+      msg: '标记消息已读成功'
+    });
+  } catch (error) {
+    return res.status(500).json({
+      code: 50000,
+      status: 0,
+      msg: '标记消息已读失败：' + error.message
+    });
+  }
+};
+
+// 标记群组消息为已读
+const markGroupRead = async (req, res) => {
+  const { userId, groupId } = req.body;
+
+  if (!userId || !groupId) {
+    return res.status(400).json({
+      code: 40000,
+      status: 0,
+      msg: '缺少必要参数'
+    });
+  }
+
+  try {
+    // 引入optimization.js中的函数
+    const { markGroupMessagesAsRead } = require('./optimization');
+
+    await markGroupMessagesAsRead(userId, groupId);
+
+    return res.status(200).json({
+      code: 20100,
+      status: 1,
+      msg: '标记群组消息已读成功'
+    });
+  } catch (error) {
+    return res.status(500).json({
+      code: 50000,
+      status: 0,
+      msg: '标记群组消息已读失败：' + error.message
+    });
+  }
+};
+
 router.get('/private/messages', getPrivateMessages);
 router.get('/userChatList', getUserList);
 router.post('/createUser', createUser);
 router.post('/login', login);
 router.get('/private/List', getPrivateList);
+router.get('/unread', getUnreadMessages);
+router.post('/markPrivateRead', markPrivateRead);
+router.post('/markGroupRead', markGroupRead);
 
 module.exports = router

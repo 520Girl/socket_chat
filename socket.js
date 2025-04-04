@@ -9,10 +9,17 @@ const {
     SocketEmitUserConnect, SocketOnUserConnect,
     GetEmitOnlineUsers, OnlineUsersList,
     SocketHeartBeat, SocketEmitTempLeaveGroup,
-    SocketOnTempLeaveGroup
+    SocketOnTempLeaveGroup, SocketEmitGetUnreadCount,
+    SocketEmitMarkPrivateRead, SocketEmitMarkGroupRead,
+    SocketOnUnreadCountUpdate, SocketOnGroupUnreadUpdate
 } = require('./constants');
 const { User, PrivateMessage, Group, GroupMessage } = require('./model');
-const { heartbeatStart,getOnlineUsers,socketMiddlewareTimer,REDIS_HEARTBEAT_PREFIX, REDIS_ONLINE_PREFIX } = require('./optimization');
+const {
+    heartbeatStart, getOnlineUsers, socketMiddlewareTimer,
+    REDIS_HEARTBEAT_PREFIX, REDIS_ONLINE_PREFIX, REDIS_GROUP_UNREAD_PREFIX,
+    incrementUnreadCount, incrementGroupUnreadCount,
+    getUserUnreadMessages, markPrivateMessagesAsRead, markGroupMessagesAsRead
+} = require('./optimization');
 module.exports = (httpServer, core) => {
     const io = socketio(httpServer, core);
 
@@ -45,7 +52,7 @@ module.exports = (httpServer, core) => {
                 //该方法会把所有用户都收到包括自己
                 io.emit(OnlineUsersList, {
                     userList: onlineUsers,
-                    onlineUsersNum:onlineUsers.length
+                    onlineUsersNum: onlineUsers.length
                 });
             } catch (e) {
                 console.error('用户的功能错误:', e);
@@ -61,26 +68,52 @@ module.exports = (httpServer, core) => {
                     User.findOne({ socketId: socket.id }),
                     User.findById(toUid)
                 ]);
-                
+
                 if (!sender || !receiver) return;
 
                 // 存储私聊消息到数据库
-                await PrivateMessage.create({
+                const message = await PrivateMessage.create({
                     sender: sender._id,
                     receiver: receiver._id,
                     content: msg,
                     type: 'text'
                 });
 
-                console.log(`私聊消息: ${sender.name} -> ${receiver.name}: ${msg}`);
-                // 发送私聊消息
-                socket.to(receiver.socketId).emit(SocketOnPrivate, {
-                    from: sender._id,
-                    to: receiver._id,
-                    name: sender.name,
-                    img: sender.img,
-                    msg
-                });
+                // 准备消息数据
+                const messageData = {
+                    id: message._id,
+                    content: msg,
+                    type: 'text',
+                    sentAt: message.sentAt,
+                    senderName: sender.name,
+                    senderImg: sender.img
+                };
+
+                // 如果接收者在线，发送消息
+                if (receiver.online && receiver.socketId) {
+                    socket.to(receiver.socketId).emit(SocketOnPrivate, {
+                        // from: sender._id,
+                        // to: receiver._id,
+                        name: sender.name,
+                        img: sender.img,
+                        msg,
+                        sentAt: message.sentAt
+                    });
+                }
+
+                // 无论接收者是否在线，都增加未读消息计数 //2
+                const unreadCount = await incrementUnreadCount(receiver._id.toString(), sender._id.toString(), messageData);
+
+                // 如果接收者在线，发送未读消息计数更新
+                if (receiver.online && receiver.socketId) {
+                    socket.to(receiver.socketId).emit(SocketOnUnreadCountUpdate, {
+                        senderId: sender._id,
+                        unreadCount,
+                        lastMessage: messageData.content
+                    });
+                }
+
+                console.log(`私聊消息: ${sender.name} -> ${receiver.name}: ${msg} (未读: ${unreadCount})`);
             } catch (e) {
                 console.error('发送私聊消息错误:', e);
             }
@@ -90,22 +123,69 @@ module.exports = (httpServer, core) => {
         //todo 监听群消息
         socket.on(SocketEmitGroupMsg, async ({ groupId, senderId, content }) => {
             try {
-                  // 并行处理消息存储和用户查询
-                    const [message, sender] = await Promise.all([
-                        GroupMessage.create({
-                            group: groupId,
-                            sender: senderId,
-                            content
-                        }),
-                        User.findById(senderId).select('name img')
-                    ]);
+                // 并行处理消息存储和用户查询
+                const [message, sender] = await Promise.all([
+                    GroupMessage.create({
+                        group: groupId,
+                        sender: senderId,
+                        content
+                    }),
+                    User.findById(senderId).select('name img')
+                ]);
+
+                // 准备消息数据
+                const messageData = {
+                    id: message._id,
+                    content,
+                    type: message.type || 'text',
+                    sentAt: message.sentAt,
+                    senderName: sender.name,
+                    senderImg: sender.img,
+                    groupId
+                };
+
+                // 增加群组未读消息计数
+                await incrementGroupUnreadCount(groupId, senderId, messageData);
 
                 // 广播给群组内所有成员
-                socket.to(`group-${groupId}`).emit(SocketOnGroupMsg,  { 
+                socket.to(`group-${groupId}`).emit(SocketOnGroupMsg, {
                     content,
                     sendAt: message.sentAt,
-                    img:sender.img
-                    });
+                    img: sender.img,
+                    sender: {
+                        _id: senderId,
+                        name: sender.name
+                    }
+                });
+
+                // 广播未读消息更新
+                // 获取群组成员并发送未读消息更新
+                const group = await Group.findById(groupId).select('members');
+                if (group) {
+
+                    for (const member of group.members) {
+                        const memberId = member.user.toString();
+                      
+                        // 跳过消息发送者自己
+                        if (memberId === senderId) continue;
+                        console.log('相同跳过 memberId:', memberId, 'senderId:', senderId);
+                        // 获取该成员的未读消息计数
+                        const unreadKey = `${REDIS_GROUP_UNREAD_PREFIX}${memberId}:${groupId}`;
+                        const unreadCount = await redis.get(unreadKey) || 0;
+
+                        // 获取该成员的socket
+                        const memberUser = await User.findById(memberId).select('socketId online');
+                        if (memberUser && memberUser.online && memberUser.socketId) {
+                            // 单独发送给每个用户
+                            io.to(memberUser.socketId).emit(SocketOnGroupUnreadUpdate, {
+                                groupId,
+                                unreadCount: parseInt(unreadCount),
+                                lastMessage: messageData.content
+                            });
+                        }
+                    
+                    }
+                }
 
             } catch (e) {
                 console.error('群消息发送错误:', e);
@@ -174,6 +254,49 @@ module.exports = (httpServer, core) => {
 
         //! 断开连接需要更新用户信息  disconnect 是在断开连接后触发
         // 用户退出状态
+        // 获取未读消息计数
+        socket.on(SocketEmitGetUnreadCount, async () => {
+            try {
+                if (!socket._id) return;
+
+                // 获取用户所有未读消息
+                const unreadMessages = await getUserUnreadMessages(socket._id);
+
+                // 发送未读消息计数给用户
+                socket.emit(SocketOnUnreadCount, unreadMessages);
+
+                console.log(`[未读消息] 用户 ${socket._id} 获取未读消息计数`);
+            } catch (error) {
+                console.error('[未读消息] 获取未读消息计数错误:', error);
+            }
+        });
+
+        // 标记私聊消息为已读
+        socket.on(SocketEmitMarkPrivateRead, async ({ senderId }) => {
+            try {
+                if (!socket._id || !senderId) return;
+
+                await markPrivateMessagesAsRead(socket._id, senderId);
+
+                console.log(`[未读消息] 用户 ${socket._id} 标记来自 ${senderId} 的私聊消息为已读`);
+            } catch (error) {
+                console.error('[未读消息] 标记私聊消息已读错误:', error);
+            }
+        });
+
+        // 标记群组消息为已读
+        socket.on(SocketEmitMarkGroupRead, async ({ groupId }) => {
+            try {
+                if (!socket._id || !groupId) return;
+
+                await markGroupMessagesAsRead(socket._id, groupId);
+
+                console.log(`[未读消息] 用户 ${socket._id} 标记群组 ${groupId} 的消息为已读`);
+            } catch (error) {
+                console.error('[未读消息] 标记群组消息已读错误:', error);
+            }
+        });
+
         socket.on('disconnect', async () => {
             try {
                 console.log('用户断开连接:', socket.id);
@@ -198,7 +321,7 @@ module.exports = (httpServer, core) => {
                     // 广播用户离开事件
                     io.emit(SocketOnGroupLeave, {
                         name: user.name,
-                        onlineUsersNum:userIds.length
+                        onlineUsersNum: userIds.length
                     });
 
                     // 获取所有在线用户
@@ -207,7 +330,7 @@ module.exports = (httpServer, core) => {
                     // 推送更新后的在线列表
                     io.emit(OnlineUsersList, {
                         userList: onlineUsers,
-                        onlineUsersNum:userIds.length
+                        onlineUsersNum: userIds.length
                     });
                 }
             } catch (err) {

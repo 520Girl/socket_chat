@@ -14,3 +14,11 @@ exports.SocketOnUserConnect = 'OnUserConnect'; // 用户连接广播
 exports.GetEmitOnlineUsers = 'GetEmitOnlineUsers'; // 获取在线用户
 exports.OnlineUsersList = 'OnlineUsersList'; // 发送用户列表
 exports.SocketHeartBeat = 'SocketHeartBeat'; // 心跳
+
+// 未读消息相关事件
+exports.SocketEmitMarkPrivateRead = 'EmitMarkPrivateRead'; // 标记私聊消息已读
+exports.SocketEmitMarkGroupRead = 'EmitMarkGroupRead'; // 标记群聊消息已读
+exports.SocketEmitGetUnreadCount = 'EmitGetUnreadCount'; // 获取未读消息计数
+exports.SocketOnUnreadCount = 'OnUnreadCount'; // 接收未读消息计数
+exports.SocketOnUnreadCountUpdate = 'unreadCountUpdate'; // 未读消息计数更新
+exports.SocketOnGrouupUnreadUpdate = 'groupUnreadUpdate'; // 群组未读消息更新

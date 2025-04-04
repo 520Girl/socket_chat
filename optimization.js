@@ -1,5 +1,5 @@
 const { redis } = require('./db');
-const { User } = require('./model');
+const { User, Group } = require('./model');
 
 /**
  * 解决用户登录后,前端意外退出，后台在线状态未更新问题
@@ -14,6 +14,16 @@ const { User } = require('./model');
 const REDIS_HEARTBEAT_PREFIX = 'user:heartbeat:';
 // 用户在线状态的Redis键前缀
 const REDIS_ONLINE_PREFIX = 'user:online:';
+// 未读消息计数的Redis键前缀
+const REDIS_UNREAD_COUNT_PREFIX = 'user:unread:';
+// 最后一条消息的Redis键前缀
+const REDIS_LAST_MESSAGE_PREFIX = 'user:lastmsg:';
+// 群组未读消息计数的Redis键前缀
+const REDIS_GROUP_UNREAD_PREFIX = 'group:unread:';
+// 群组最后一条消息的Redis键前缀
+const REDIS_GROUP_LAST_MESSAGE_PREFIX = 'group:lastmsg:';
+// 未读消息缓存过期时间（7天）
+const UNREAD_CACHE_EXPIRY = 60 * 60 * 24 * 7;
 // 心跳超时时间（毫秒）
 const HEARTBEAT_TIMEOUT = 30000; // 30秒
 // 心跳检查间隔（毫秒）
@@ -37,6 +47,7 @@ const heartbeatStart = async (socket) => {
     await redis.set(`${REDIS_ONLINE_PREFIX}${userId}`, socketId, 'EX', Math.ceil(HEARTBEAT_TIMEOUT / 1000));
 
     // 更新用户在线状态
+    console.log(`[Heartbeat] 用户sssssssssssssss ${userId} 上线，socketId: ${socketId}`);
     await User.findByIdAndUpdate(userId, { online: true, lastActive: Date.now(), socketId });
 
     console.log(`[Heartbeat] 用户 ${userId} 心跳检测已启动`);
@@ -51,7 +62,7 @@ const heartbeatStart = async (socket) => {
                 await redis.set(`${REDIS_ONLINE_PREFIX}${userId}`, socketId, 'EX', Math.ceil(HEARTBEAT_TIMEOUT / 1000));
 
                 // 更新用户最后活跃时间
-                await User.findByIdAndUpdate(userId, { lastActive: Date.now(),socketId:socket.id });
+                await User.findByIdAndUpdate(userId, { lastActive: Date.now(), socketId: socket.id });
 
                 console.log(`[Heartbeat] 用户 ${userId} 心跳包 ${packet.type === 2 ? 'ping' : 'pong'} 已处理`);
             } catch (error) {
@@ -126,7 +137,7 @@ const getOnlineUsers = async () => {
  * socket 事件处理时间监控中间件
  * 
  * */
-const socketMiddlewareTimer = (io)=>{
+const socketMiddlewareTimer = (io) => {
     // 添加事件处理时间监控中间件
     io.use((socket, next) => {
         const originalEmit = socket.emit;
@@ -157,10 +168,237 @@ const socketMiddlewareTimer = (io)=>{
     });
 }
 
+/**
+ * 增加私聊未读消息计数
+ * @param {String} userId - 接收者用户ID
+ * @param {String} senderId - 发送者用户ID
+ * @param {Object} messageData - 消息数据
+ * @returns {Promise<Number>} 更新后的未读消息数
+ */
+const incrementUnreadCount = async (userId, senderId, messageData) => {
+    try {
+        // 用户未读消息计数键
+        const unreadKey = `${REDIS_UNREAD_COUNT_PREFIX}${userId}:${senderId}`;
+        // 用户最后一条消息键
+        const lastMsgKey = `${REDIS_LAST_MESSAGE_PREFIX}${userId}:${senderId}`;
+
+        // 原子操作：增加未读计数并设置过期时间
+        const pipeline = redis.pipeline();
+        pipeline.incr(unreadKey);
+        pipeline.expire(unreadKey, UNREAD_CACHE_EXPIRY);
+
+        // 存储最后一条消息
+        pipeline.set(lastMsgKey, JSON.stringify(messageData), 'EX', UNREAD_CACHE_EXPIRY);
+
+        const results = await pipeline.exec();
+        console.log('[未读消息] 增加未读计数结果:', results); //[ [ null, 2 ], [ null, 1 ], [ null, 'OK' ] ]
+        // 返回更新后的未读计数
+        return results[0][1];
+    } catch (error) {
+        console.error('[未读消息] 增加未读计数错误:', error);
+        return 0;
+    }
+};
+
+/**
+ * 增加群组未读消息计数
+ * @param {String} groupId - 群组ID
+ * @param {String} userId - 用户ID
+ * @param {Object} messageData - 消息数据
+ * @returns {Promise<Object>} 包含每个成员ID和其未读消息计数的对象
+ */
+const incrementGroupUnreadCount = async (groupId, userId, messageData) => {
+    try {
+        // 获取群组所有成员
+        const group = await Group.findById(groupId).select('members');
+        if (!group) return {};
+
+        const pipeline = redis.pipeline();
+        const memberIds = [];
+
+        // 为群组中除发送者外的所有成员增加未读计数
+        for (const member of group.members) {
+            const memberId = member.user.toString();
+            // 跳过消息发送者自己
+            if (memberId === userId) continue;
+
+            memberIds.push(memberId);
+
+            // 用户的群组未读消息计数键
+            const unreadKey = `${REDIS_GROUP_UNREAD_PREFIX}${memberId}:${groupId}`;
+            // 群组最后一条消息键
+            const lastMsgKey = `${REDIS_GROUP_LAST_MESSAGE_PREFIX}${memberId}:${groupId}`;
+
+            // 增加未读计数并设置过期时间
+            pipeline.incr(unreadKey);
+            pipeline.expire(unreadKey, UNREAD_CACHE_EXPIRY);
+
+            // 存储最后一条消息
+            pipeline.set(lastMsgKey, JSON.stringify(messageData), 'EX', UNREAD_CACHE_EXPIRY);
+        }
+
+        const results = await pipeline.exec();
+        //[
+//   [ null, 2 ],
+//   [ null, 1 ],
+//   [ null, 'OK' ],
+//   [ null, 3 ],
+//   [ null, 1 ],
+//   [ null, 'OK' ]
+// ]
+        console.log('[未读消息] 增加群组未读计数结果:', results);
+
+        // 返回每个成员的未读计数
+        const unreadCounts = {};
+        let resultIndex = 0;
+        for (const memberId of memberIds) {
+            // 每个成员有3个操作：incr, expire, set，所以取第一个操作的结果
+            unreadCounts[memberId] = results[resultIndex][1];
+            resultIndex += 3; // 跳过expire和set操作的结果
+        }
+
+        return unreadCounts;
+    } catch (error) {
+        console.error('[未读消息] 增加群组未读计数错误:', error);
+        return {};
+    }
+};
+
+/**
+ * 获取用户所有未读消息计数
+ * @param {String} userId - 用户ID
+ * @returns {Promise<Object>} 未读消息计数和最后一条消息
+ */
+const getUserUnreadMessages = async (userId) => {
+    try {
+        // 获取所有私聊未读消息键
+        const privateUnreadKeys = await redis.keys(`${REDIS_UNREAD_COUNT_PREFIX}${userId}:*`);
+        // 获取所有群组未读消息键
+        const groupUnreadKeys = await redis.keys(`${REDIS_GROUP_UNREAD_PREFIX}${userId}:*`);
+
+        const result = {
+            private: [],
+            group: []
+        };
+
+        // 处理私聊未读消息
+        if (privateUnreadKeys.length > 0) {
+            const pipeline = redis.pipeline();
+
+            // 获取所有未读计数
+            for (const key of privateUnreadKeys) {
+                pipeline.get(key);
+                // 获取对应的最后一条消息
+                const senderId = key.split(':')[2];
+                pipeline.get(`${REDIS_LAST_MESSAGE_PREFIX}${userId}:${senderId}`);
+            }
+
+            const responses = await pipeline.exec();
+
+            // 处理结果
+            for (let i = 0; i < privateUnreadKeys.length; i++) {
+                const key = privateUnreadKeys[i];
+                const senderId = key.split(':')[2];
+                const count = parseInt(responses[i * 2][1] || '0');
+                const lastMessage = responses[i * 2 + 1][1] ? JSON.parse(responses[i * 2 + 1][1]) : null;
+
+                result.private.push({
+                    senderId,
+                    unreadCount: count,
+                    lastMessage
+                });
+            }
+        }
+
+        // 处理群组未读消息
+        if (groupUnreadKeys.length > 0) {
+            const pipeline = redis.pipeline();
+
+            // 获取所有未读计数
+            for (const key of groupUnreadKeys) {
+                pipeline.get(key);
+                // 获取对应的最后一条消息
+                const groupId = key.split(':')[2];
+                pipeline.get(`${REDIS_GROUP_LAST_MESSAGE_PREFIX}${userId}:${groupId}`);
+            }
+
+            const responses = await pipeline.exec();
+
+            // 处理结果
+            for (let i = 0; i < groupUnreadKeys.length; i++) {
+                const key = groupUnreadKeys[i];
+                const groupId = key.split(':')[2];
+                const count = parseInt(responses[i * 2][1] || '0');
+                const lastMessage = responses[i * 2 + 1][1] ? JSON.parse(responses[i * 2 + 1][1]) : null;
+
+                result.group.push({
+                    groupId,
+                    unreadCount: count,
+                    lastMessage
+                });
+            }
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[未读消息] 获取未读消息错误:', error);
+        return { private: [], group: [] };
+    }
+};
+
+/**
+ * 标记私聊消息为已读
+ * @param {String} userId - 接收者用户ID
+ * @param {String} senderId - 发送者用户ID
+ * @returns {Promise<void>}
+ */
+const markPrivateMessagesAsRead = async (userId, senderId) => {
+    try {
+        // 删除Redis中的未读计数
+        const unreadKey = `${REDIS_UNREAD_COUNT_PREFIX}${userId}:${senderId}`;
+        await redis.del(unreadKey);
+
+        // 更新数据库中的消息状态
+        await PrivateMessage.updateMany(
+            {
+                sender: senderId,
+                receiver: userId,
+                isRead: false
+            },
+            { isRead: true }
+        );
+    } catch (error) {
+        console.error('[未读消息] 标记私聊消息已读错误:', error);
+    }
+};
+
+/**
+ * 标记群组消息为已读
+ * @param {String} userId - 用户ID
+ * @param {String} groupId - 群组ID
+ * @returns {Promise<void>}
+ */
+const markGroupMessagesAsRead = async (userId, groupId) => {
+    try {
+        // 删除Redis中的未读计数
+        const unreadKey = `${REDIS_GROUP_UNREAD_PREFIX}${userId}:${groupId}`;
+        await redis.del(unreadKey);
+    } catch (error) {
+        console.error('[未读消息] 标记群组消息已读错误:', error);
+    }
+};
+
 module.exports = {
     heartbeatStart,
     getOnlineUsers,
     socketMiddlewareTimer,
     REDIS_HEARTBEAT_PREFIX,
     REDIS_ONLINE_PREFIX,
+    REDIS_UNREAD_COUNT_PREFIX,
+    REDIS_GROUP_UNREAD_PREFIX,
+    incrementUnreadCount,
+    incrementGroupUnreadCount,
+    getUserUnreadMessages,
+    markPrivateMessagesAsRead,
+    markGroupMessagesAsRead
 }
