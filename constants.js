@@ -21,4 +21,4 @@ exports.SocketEmitMarkGroupRead = 'EmitMarkGroupRead'; // 标记群聊消息已�
 exports.SocketEmitGetUnreadCount = 'EmitGetUnreadCount'; // 获取未读消息计数
 exports.SocketOnUnreadCount = 'OnUnreadCount'; // 接收未读消息计数
 exports.SocketOnUnreadCountUpdate = 'unreadCountUpdate'; // 未读消息计数更新
-exports.SocketOnGrouupUnreadUpdate = 'groupUnreadUpdate'; // 群组未读消息更新
+exports.SocketOnGroupUnreadUpdate = 'groupUnreadUpdate'; // 群组未读消息更新

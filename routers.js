@@ -148,6 +148,8 @@ const getPrivateMessages = async (req, res) => {
     });
   }
 }
+
+
 // 创建群组
 const createGroup = async (req, res) => {
   const { name, creatorId, memberIds, avatar } = req.body;
@@ -169,27 +171,51 @@ const createGroup = async (req, res) => {
 
 //加入群聊
 const joinGroup = async (req, res) => {
-  const { groupId, userId } = req.body;
+  const { groupId: groupIdStr, userId: userIdStr } = req.body;
+  const groupId = new mongoose.Types.ObjectId(groupIdStr);
+  const userId = new mongoose.Types.ObjectId(userIdStr);
 
-  const group = await Group.findOneAndUpdate(
+  const group = await Group.findById(groupId);
+  if (!group) {
+    return res.status(404).json({
+      code: 40400,
+      status: 0,
+      msg: '群组不存在'
+    });
+  }
+
+  // 检查用户是否已经在群组中
+  const isUserInGroup = group.members.some(member => member.user.toString() === userId.toString());
+  if (isUserInGroup) {
+    return res.status(200).json({
+      code: 20100,
+      status: 1,
+      data: group,
+      msg: '用户已在群组中'
+    });
+  }
+
+  // 用户不在群组中，添加新成员
+  const updatedGroup = await Group.findOneAndUpdate(
     { _id: groupId },
     { $push: { members: { user: userId, joinTime: Date.now() } } },
     { new: true }
   );
+
   // 将用户加入群组的记录存储到用户模型中
   await User.findOneAndUpdate(
     { _id: userId },
-    { $push: { groups: groupId } },
+    { $push: { group: groupId } },
     { new: true }
-  )
+  );
 
   return res.status(200).json({
     code: 20100,
     status: 1,
-    data: group,
+    data: updatedGroup,
     msg: '加入群组成功'
-  })
-}
+  });
+};
 // 获取群组列表
 const getGroupList = async (req, res) => {
   const { userId } = req.query;
@@ -256,10 +282,25 @@ const getGroupList = async (req, res) => {
       }
     }
   ]);
+
+  // 获取未读消息数据
+  const { getUserUnreadMessages } = require('./optimization');
+  const unreadMessages = await getUserUnreadMessages(userId);
+  
+  // 将未读消息数据添加到群组列表中
+  const groupListWithUnread = groupList.map(group => {
+    const groupId = group._id.toString();
+    const groupUnread = unreadMessages.group.find(item => item.groupId === groupId);
+    return {
+      ...group,
+      unreadCount: groupUnread ? groupUnread.unreadCount : 0
+    };
+  });
+
   res.status(200).json({
     code: 20100,
     status: 1,
-    data: groupList,
+    data: groupListWithUnread,
     msg: '群组列表获取成功'
   });
 }
@@ -443,6 +484,35 @@ const markGroupRead = async (req, res) => {
   }
 };
 
+//? 获取群聊和私聊列表
+const getChatList = async (req, res,next) => {
+  try{
+    const { userId } = req.body;
+    // 获取未读消息数据
+    const { getUserUnreadMessages } = require('./optimization');
+    const unreadMessages = await getUserUnreadMessages(userId);
+    
+    // 将未读消息数据添加到聊天列表中
+    // const messagesWithUnread = messages.map(chat => {
+    //   const senderId = chat._id.toString();
+    //   const privateUnread = unreadMessages.private.find(item => item.senderId === senderId);
+    //   return {
+    //     ...chat,
+    //     unreadCount: privateUnread ? privateUnread.unreadCount : 0
+    //   };
+    // });
+    return res.status(200).json({
+      code: 20100,
+      status: 1,
+      data: unreadMessages,
+      msg: '获取聊天列表成功'
+    });
+  } catch (error) {
+next(error);
+}
+}
+
+
 router.get('/private/messages', getPrivateMessages);
 router.get('/userChatList', getUserList);
 router.post('/createUser', createUser);
@@ -450,6 +520,7 @@ router.post('/login', login);
 router.get('/private/List', getPrivateList);
 router.get('/unread', getUnreadMessages);
 router.post('/markPrivateRead', markPrivateRead);
-router.post('/markGroupRead', markGroupRead);
+router.post('/group/markGroupRead', markGroupRead);
+router.post('/chatList', getChatList);
 
 module.exports = router

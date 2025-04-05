@@ -1,6 +1,6 @@
 const { redis } = require('./db');
 const { User, Group } = require('./model');
-
+const { SocketOnGroupUnreadUpdate } = require('./constants');
 /**
  * 解决用户登录后,前端意外退出，后台在线状态未更新问题
  * 知识点：pong 是客户端发送给服务端的一个心跳包，用于保持连接的活跃状态。 ping 是服务端发送给客户端的一个心跳包，用于保持连接的活跃状态。
@@ -210,7 +210,7 @@ const incrementUnreadCount = async (userId, senderId, messageData) => {
 const incrementGroupUnreadCount = async (groupId, userId, messageData) => {
     try {
         // 获取群组所有成员
-        const group = await Group.findById(groupId).select('members');
+        const group = await Group.findById(groupId).select('members name');
         if (!group) return {};
 
         const pipeline = redis.pipeline();
@@ -232,6 +232,8 @@ const incrementGroupUnreadCount = async (groupId, userId, messageData) => {
             // 增加未读计数并设置过期时间
             pipeline.incr(unreadKey);
             pipeline.expire(unreadKey, UNREAD_CACHE_EXPIRY);
+            //将群的name 存入数据
+            messageData.groupName = group.name;
 
             // 存储最后一条消息
             pipeline.set(lastMsgKey, JSON.stringify(messageData), 'EX', UNREAD_CACHE_EXPIRY);
@@ -239,14 +241,14 @@ const incrementGroupUnreadCount = async (groupId, userId, messageData) => {
 
         const results = await pipeline.exec();
         //[
-//   [ null, 2 ],
-//   [ null, 1 ],
-//   [ null, 'OK' ],
-//   [ null, 3 ],
-//   [ null, 1 ],
-//   [ null, 'OK' ]
-// ]
-        console.log('[未读消息] 增加群组未读计数结果:', results);
+        //   [ null, 2 ],
+        //   [ null, 1 ],
+        //   [ null, 'OK' ],
+        //   [ null, 3 ],
+        //   [ null, 1 ],
+        //   [ null, 'OK' ]
+        // ]
+        // console.log('[未读消息] 增加群组未读计数结果:', results);
 
         // 返回每个成员的未读计数
         const unreadCounts = {};
@@ -273,6 +275,10 @@ const getUserUnreadMessages = async (userId) => {
     try {
         // 获取所有私聊未读消息键
         const privateUnreadKeys = await redis.keys(`${REDIS_UNREAD_COUNT_PREFIX}${userId}:*`);
+        //[
+        //   'user:unread:67ed6790398dd9e6a9876e1f:67ed6eef2cb648c8bea90cea',
+        //   'user:unread:67ed6790398dd9e6a9876e1f:67ed6f8b2cb648c8bea90d9f'
+        // ]
         // 获取所有群组未读消息键
         const groupUnreadKeys = await redis.keys(`${REDIS_GROUP_UNREAD_PREFIX}${userId}:*`);
 
@@ -289,23 +295,27 @@ const getUserUnreadMessages = async (userId) => {
             for (const key of privateUnreadKeys) {
                 pipeline.get(key);
                 // 获取对应的最后一条消息
-                const senderId = key.split(':')[2];
-                pipeline.get(`${REDIS_LAST_MESSAGE_PREFIX}${userId}:${senderId}`);
+                const senderId = key.split(':')[3];
+                // 正确构造最后一条消息的键名
+                const lastMsgKey = `${REDIS_LAST_MESSAGE_PREFIX}${userId}:${senderId}`;
+                pipeline.get(lastMsgKey);
             }
 
             const responses = await pipeline.exec();
-
             // 处理结果
             for (let i = 0; i < privateUnreadKeys.length; i++) {
                 const key = privateUnreadKeys[i];
-                const senderId = key.split(':')[2];
+                const senderId = key.split(':')[3];
                 const count = parseInt(responses[i * 2][1] || '0');
                 const lastMessage = responses[i * 2 + 1][1] ? JSON.parse(responses[i * 2 + 1][1]) : null;
 
                 result.private.push({
-                    senderId,
+                    userId,
                     unreadCount: count,
-                    lastMessage
+                    lastMessage:{
+                        ...lastMessage,
+                        senderId
+                    },
                 });
             }
         }
@@ -318,7 +328,7 @@ const getUserUnreadMessages = async (userId) => {
             for (const key of groupUnreadKeys) {
                 pipeline.get(key);
                 // 获取对应的最后一条消息
-                const groupId = key.split(':')[2];
+                const groupId = key.split(':')[3];
                 pipeline.get(`${REDIS_GROUP_LAST_MESSAGE_PREFIX}${userId}:${groupId}`);
             }
 
@@ -327,11 +337,12 @@ const getUserUnreadMessages = async (userId) => {
             // 处理结果
             for (let i = 0; i < groupUnreadKeys.length; i++) {
                 const key = groupUnreadKeys[i];
-                const groupId = key.split(':')[2];
+                const groupId = key.split(':')[3];
                 const count = parseInt(responses[i * 2][1] || '0');
                 const lastMessage = responses[i * 2 + 1][1] ? JSON.parse(responses[i * 2 + 1][1]) : null;
 
                 result.group.push({
+                    userId,
                     groupId,
                     unreadCount: count,
                     lastMessage
@@ -388,6 +399,39 @@ const markGroupMessagesAsRead = async (userId, groupId) => {
     }
 };
 
+// 广播群组未读消息更新的函数
+const broadcastGroupUnreadUpdate = async (io, socket, groupId, senderId, messageData) => {
+    try {
+        const group = await Group.findById(groupId).select('members');
+        if (!group) return;
+
+        for (const member of group.members) {
+            const memberId = member.user.toString();
+
+            // 跳过消息发送者自己
+            if (memberId === senderId) continue;
+
+            // 获取该成员的未读消息计数
+            const unreadKey = `${REDIS_GROUP_UNREAD_PREFIX}${memberId}:${groupId}`;
+            const unreadCount = await redis.get(unreadKey) || 0;
+
+            // 获取该成员的在线状态和socket信息
+            const memberUser = await User.findById(memberId).select('socketId online');
+            // console.log(`memberUser: ${memberUser}`);
+            // 使用io.to()替代socket.to()，避免影响连接状态
+            if (memberUser && memberUser.online && memberUser.socketId) {
+                io.to(memberUser.socketId).emit(SocketOnGroupUnreadUpdate, {
+                    groupId,
+                    unreadCount: unreadCount,
+                    lastMessage: messageData.content
+                });
+            }
+        }
+    } catch (error) {
+        console.error('广播群组未读消息更新错误:', error);
+    }
+};
+
 module.exports = {
     heartbeatStart,
     getOnlineUsers,
@@ -400,5 +444,6 @@ module.exports = {
     incrementGroupUnreadCount,
     getUserUnreadMessages,
     markPrivateMessagesAsRead,
-    markGroupMessagesAsRead
+    markGroupMessagesAsRead,
+    broadcastGroupUnreadUpdate
 }

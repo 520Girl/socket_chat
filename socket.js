@@ -18,12 +18,14 @@ const {
     heartbeatStart, getOnlineUsers, socketMiddlewareTimer,
     REDIS_HEARTBEAT_PREFIX, REDIS_ONLINE_PREFIX, REDIS_GROUP_UNREAD_PREFIX,
     incrementUnreadCount, incrementGroupUnreadCount,
-    getUserUnreadMessages, markPrivateMessagesAsRead, markGroupMessagesAsRead
+    getUserUnreadMessages, markPrivateMessagesAsRead, markGroupMessagesAsRead,
+    broadcastGroupUnreadUpdate
 } = require('./optimization');
 module.exports = (httpServer, core) => {
     const io = socketio(httpServer, core);
 
     socketMiddlewareTimer(io);
+
 
     io.on('connection', (socket) => {
         console.log('创建了一个socket连接');
@@ -86,13 +88,13 @@ module.exports = (httpServer, core) => {
                     type: 'text',
                     sentAt: message.sentAt,
                     senderName: sender.name,
-                    senderImg: sender.img
+                    senderImg: sender.img,
                 };
 
                 // 如果接收者在线，发送消息
                 if (receiver.online && receiver.socketId) {
                     socket.to(receiver.socketId).emit(SocketOnPrivate, {
-                        // from: sender._id,
+                        from: sender._id,
                         // to: receiver._id,
                         name: sender.name,
                         img: sender.img,
@@ -106,7 +108,7 @@ module.exports = (httpServer, core) => {
 
                 // 如果接收者在线，发送未读消息计数更新
                 if (receiver.online && receiver.socketId) {
-                    socket.to(receiver.socketId).emit(SocketOnUnreadCountUpdate, {
+                    io.to(receiver.socketId).emit(SocketOnUnreadCountUpdate, {
                         senderId: sender._id,
                         unreadCount,
                         lastMessage: messageData.content
@@ -147,6 +149,7 @@ module.exports = (httpServer, core) => {
                 // 增加群组未读消息计数
                 await incrementGroupUnreadCount(groupId, senderId, messageData);
 
+                console.log(`群消息: ${sender.name} -> ${groupId}: ${content}`);
                 // 广播给群组内所有成员
                 socket.to(`group-${groupId}`).emit(SocketOnGroupMsg, {
                     content,
@@ -158,34 +161,8 @@ module.exports = (httpServer, core) => {
                     }
                 });
 
-                // 广播未读消息更新
-                // 获取群组成员并发送未读消息更新
-                const group = await Group.findById(groupId).select('members');
-                if (group) {
-
-                    for (const member of group.members) {
-                        const memberId = member.user.toString();
-                      
-                        // 跳过消息发送者自己
-                        if (memberId === senderId) continue;
-                        console.log('相同跳过 memberId:', memberId, 'senderId:', senderId);
-                        // 获取该成员的未读消息计数
-                        const unreadKey = `${REDIS_GROUP_UNREAD_PREFIX}${memberId}:${groupId}`;
-                        const unreadCount = await redis.get(unreadKey) || 0;
-
-                        // 获取该成员的socket
-                        const memberUser = await User.findById(memberId).select('socketId online');
-                        if (memberUser && memberUser.online && memberUser.socketId) {
-                            // 单独发送给每个用户
-                            io.to(memberUser.socketId).emit(SocketOnGroupUnreadUpdate, {
-                                groupId,
-                                unreadCount: parseInt(unreadCount),
-                                lastMessage: messageData.content
-                            });
-                        }
-                    
-                    }
-                }
+                // 调用抽取出来的广播未读消息更新函数
+                await broadcastGroupUnreadUpdate(io,socket, groupId, senderId, messageData);
 
             } catch (e) {
                 console.error('群消息发送错误:', e);
@@ -232,16 +209,17 @@ module.exports = (httpServer, core) => {
                     { _id: groupId },
                     { $pull: { members: { user: userId } } }
                 );
+
                 // 2. 离开socket房间
                 socket.leave(`group-${groupId}`);
 
                 // 3. 通知群组其他成员
-                socket.to(`group-${groupId}`).emit(SocketOnGroupLeave, {
+                io.to(`group-${groupId}`).emit(SocketOnGroupLeave, {
                     userId,
                     groupId
                 });
 
-                // 4. 可选：更新用户自己的群组列表
+                // 4. 更新用户自己的群组列表
                 await User.updateOne(
                     { _id: userId },
                     { $pull: { groups: groupId } }
@@ -348,6 +326,9 @@ module.exports = (httpServer, core) => {
 
         // 监听引擎的 ping/pong（通过 socket.io.engine）
         //! 优化方案 - 使用Redis实现心跳机制
-
+        // socket.on('EmitGroupUnreadUpdate', async ({groupId, senderId, content}) => {
+        //     console.log('EmitGroupUnreadUpdate', groupId, senderId, content)
+        //     await broadcastGroupUnreadUpdate(socket, groupId, senderId, {content:content}) 
+        // })
     })
 }

@@ -19,7 +19,7 @@ app.use('/', router);
 app.use('/api', routers);
 app.use((err, req, res, next) => {
     res.status(500).json({
-        message: err.message,
+        msg: err.message,
         code: 500,
         status: 0
     });
