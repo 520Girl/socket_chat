@@ -21,6 +21,7 @@ const {
     getUserUnreadMessages, markPrivateMessagesAsRead, markGroupMessagesAsRead,
     broadcastGroupUnreadUpdate
 } = require('./optimization');
+const { getMessageHistory } = require('./dataLayerManager');
 module.exports = (httpServer, core) => {
     const io = socketio(httpServer, core);
 
@@ -330,5 +331,27 @@ module.exports = (httpServer, core) => {
         //     console.log('EmitGroupUnreadUpdate', groupId, senderId, content)
         //     await broadcastGroupUnreadUpdate(socket, groupId, senderId, {content:content}) 
         // })
+        
+        // 获取消息历史记录
+        socket.on('GetMessageHistory', async ({ chatId, isGroup, limit }) => {
+            try {
+                if (!socket._id) return;
+                
+                // 使用数据分层缓存策略获取消息历史
+                const messages = await getMessageHistory(socket._id, chatId, isGroup, limit || 20);
+                
+                // 发送消息历史给客户端
+                socket.emit('MessageHistory', {
+                    chatId,
+                    isGroup,
+                    messages
+                });
+                
+                console.log(`[消息历史] 用户 ${socket._id} 获取${isGroup ? '群组' : '私聊'}消息历史: ${chatId}, 共 ${messages.length} 条`);
+            } catch (error) {
+                console.error('[消息历史] 获取消息历史错误:', error);
+                socket.emit('MessageHistoryError', { error: '获取消息历史失败' });
+            }
+        });
     })
 }

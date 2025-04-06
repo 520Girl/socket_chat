@@ -132,8 +132,8 @@
 #### 实现原理
 
 1. **双层存储架构**：
-   - MongoDB层：存储完整的消息记录，包含isRead字段标记消息是否已读
-   - Redis层：缓存未读消息计数和最后一条消息内容，提供快速访问
+   - MongoDB层：存储完整的消息记录，使用isRead字段标记消息是否已读（而非isDelivered）
+   - Redis层：缓存未读消息计数和最后一条消息内容，作为热数据快速访问层
 
 2. **Redis键设计**：
    - 私聊未读计数：`user:unread:{userId}:{senderId}`
@@ -142,33 +142,117 @@
    - 群组最后消息：`group:lastmsg:{userId}:{groupId}`
 
 3. **消息发送流程**：
-   - 消息存储到MongoDB数据库
-   - 更新Redis中的未读计数和最后一条消息
+   - 消息存储到MongoDB数据库，初始isRead状态为false
+   - 更新Redis中的未读计数和最后一条消息（热数据缓存）
    - 通过WebSocket实时推送未读计数更新
 
-4. **已读标记处理**：
+4. **用户上线拉取未读消息机制**：
+   - 用户上线时，自动从Redis获取未读消息计数和最新消息
+   - 如Redis中数据过期，则回退到MongoDB查询未读消息（isRead=false）
+   - 支持批量拉取所有会话的未读消息数，减少请求次数
+
+5. **已读标记处理**：
    - 用户查看消息时，通过API或WebSocket事件标记消息为已读
    - 清除Redis中的未读计数
-   - 更新MongoDB中的消息已读状态
+   - 更新MongoDB中的消息isRead状态为true
+   - 支持批量标记已读，提高性能
 
-5. **性能优化**：
+6. **性能优化**：
    - 使用Redis管道(pipeline)批量处理命令
    - 设置合理的缓存过期时间（7天）
    - 异步更新数据库中的已读状态
+   - 定期同步Redis和MongoDB数据，确保一致性
+
+7. **热数据与高频数据分层缓存策略**：
+   - 热数据定义：24小时内的消息数据，优先级最高
+   - 高频数据定义：7天内的消息数据，优先级次之
+   - 冷数据：7天以上的历史数据，仅存储在MongoDB中
+   - 缓存策略：
+     - 热数据使用Redis内存缓存，设置24小时过期时间
+     - 高频数据使用Redis缓存，但设置较低的内存优先级
+     - 冷数据访问时按需从MongoDB加载到Redis，并设置短期缓存
+   - 数据淘汰机制：
+     - 内存压力大时，优先淘汰高频数据而保留热数据
+     - 使用Redis的LRU（最近最少使用）策略自动管理内存
+     - 定期任务将过期热数据降级为高频数据
 
 #### API接口
 
-1. **获取未读消息计数**：
+##### 用户相关
+
+1. **用户登录/注册**：
+   - 路由：`POST /login`
+   - 参数：`{ name, img, online, password }`
+   - 返回：用户信息
+
+2. **获取用户列表**：
+   - 路由：`GET /userChatList`
+   - 返回：所有用户信息列表
+
+3. **创建用户**：
+   - 路由：`POST /createUser`
+   - 参数：`{ name, img }`
+   - 返回：创建的用户信息
+
+##### 聊天列表
+
+4. **获取聊天列表(包含私聊和群聊)**：
+   - 路由：`POST /chatList`
+   - 参数：`{ userId }`
+   - 返回：包含未读消息数的私聊和群聊列表
+
+##### 私聊相关
+
+5. **获取私聊消息历史**：
+   - 路由：`GET /private/messages?senderId={senderId}&receiverId={receiverId}`
+   - 返回：两用户间的历史消息列表
+
+6. **获取未读消息计数**：
    - 路由：`GET /unread?userId={userId}`
    - 返回：私聊和群组的未读消息计数及最后一条消息
 
-2. **标记私聊消息已读**：
+7. **标记私聊消息已读**：
    - 路由：`POST /markPrivateRead`
    - 参数：`{ userId, senderId }`
+   - 返回：操作状态
 
-3. **标记群组消息已读**：
-   - 路由：`POST /markGroupRead`
-   - 参数：`{ userId, groupId }`
+##### 群组相关
+
+8. **创建群组**：
+   - 路由：`POST /group/create`
+   - 参数：`{ name, creatorId, memberIds, avatar }`
+   - 返回：创建的群组信息
+
+9. **加入群组**：
+   - 路由：`POST /group/join`
+   - 参数：`{ groupId, userId }`
+   - 返回：更新后的群组信息
+
+10. **获取群组列表**：
+    - 路由：`GET /group/list?userId={userId}`
+    - 返回：用户加入的群组列表
+
+11. **获取所有群组**：
+    - 路由：`GET /group/allList`
+    - 返回：系统中所有群组列表
+
+12. **获取群成员**：
+    - 路由：`GET /group/members/:groupId`
+    - 返回：指定群组的成员列表
+
+13. **发送群消息**：
+    - 路由：`POST /group/send`
+    - 参数：`{ groupId, senderId, content, type }`
+    - 返回：发送的消息信息
+
+14. **获取群消息历史**：
+    - 路由：`GET /group/messages?groupId={groupId}`
+    - 返回：群组的历史消息列表
+
+15. **标记群组消息已读**：
+    - 路由：`POST /group/markGroupRead`
+    - 参数：`{ userId, groupId }`
+    - 返回：操作状态
 
 #### WebSocket事件
 

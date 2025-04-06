@@ -5,6 +5,10 @@ const router = express.Router();
 const routers = require('./routers');
 const io = require('./socket')
 require('./db');
+const { initDataLayerManager } = require('./dataLayerManager');
+
+// 初始化数据分层管理
+initDataLayerManager();
 app.use(express.json()); // for parsing application/json
 app.use(express.urlencoded({ extended: true })); 
 io(http,{
@@ -26,6 +30,6 @@ app.use((err, req, res, next) => {
 })
 
 // 使用router中间件更规范
-http.listen(3008, () => {
+http.listen(3008, '0.0.0.0', () => {
     console.log('Server is running on port 3008', 'http://localhost:3008');
 });

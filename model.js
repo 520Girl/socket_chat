@@ -65,6 +65,10 @@ const groupMessageSchema = new mongoose.Schema({
     sentAt: {
         type: Date,
         default: Date.now // 自动记录发送时间
+    },
+    isRead: {
+        type: Boolean,
+        default: false // 消息是否已读
     }
 });
 // 存储私聊消息记录

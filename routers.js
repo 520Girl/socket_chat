@@ -50,9 +50,9 @@ const createUser = async (req, res, next) => {
     msg: '创建成功',
   });
 }
-// 获取个人聊天列表
-const getPrivateList = async (req, res) => {
-  const { userId } = req.query;
+// 获取个人聊天列表 未包含未读消息
+const getPrivateList = async (userId) => {
+  // const { userId } = req.query;
 
   const messages = await PrivateMessage.aggregate([
     {
@@ -95,6 +95,7 @@ const getPrivateList = async (req, res) => {
         online: '$userInfo.online',
         lastActive: '$userInfo.lastActive',
         lastMessage: {
+          _id: '$lastMessage._id',
           content: '$lastMessage.content',
           type: '$lastMessage.type',
           sentAt: '$lastMessage.sentAt',
@@ -110,13 +111,15 @@ const getPrivateList = async (req, res) => {
       }
     }
   ]);
+  
+  return messages
 
-  return res.status(200).json({
-    code: 20100,
-    status: 1,
-    data: messages,
-    msg: '获取私聊列表成功'
-  });
+  // return res.status(200).json({
+  //   code: 20100,
+  //   status: 1,
+  //   data: messages,
+  //   msg: '获取私聊列表成功'
+  // });
 }
 
 // 获取私聊消息历史
@@ -216,17 +219,17 @@ const joinGroup = async (req, res) => {
     msg: '加入群组成功'
   });
 };
-// 获取群组列表
-const getGroupList = async (req, res) => {
-  const { userId } = req.query;
+// 获取群组列表 未包含未读消息数
+const getGroupList = async (userId) => {
+  // const { userId } = req.query;
 
-  if (!userId) {
-    return res.status(400).json({
-      code: 40000,
-      status: 0,
-      msg: '缺少必要参数userId'
-    });
-  }
+  // if (!userId) {
+  //   return res.status(400).json({
+  //     code: 40000,
+  //     status: 0,
+  //     msg: '缺少必要参数userId'
+  //   });
+  // }
 
   const groupList = await Group.aggregate([
     {
@@ -258,7 +261,7 @@ const getGroupList = async (req, res) => {
               sentAt: 1,
               sender_id: '$sender._id',
               sender_name: '$sender.name',
-              _id: 0
+              _id: 1
             }
           }
         ],
@@ -282,27 +285,14 @@ const getGroupList = async (req, res) => {
       }
     }
   ]);
+  return groupList;
 
-  // 获取未读消息数据
-  const { getUserUnreadMessages } = require('./optimization');
-  const unreadMessages = await getUserUnreadMessages(userId);
-  
-  // 将未读消息数据添加到群组列表中
-  const groupListWithUnread = groupList.map(group => {
-    const groupId = group._id.toString();
-    const groupUnread = unreadMessages.group.find(item => item.groupId === groupId);
-    return {
-      ...group,
-      unreadCount: groupUnread ? groupUnread.unreadCount : 0
-    };
-  });
-
-  res.status(200).json({
-    code: 20100,
-    status: 1,
-    data: groupListWithUnread,
-    msg: '群组列表获取成功'
-  });
+  // res.status(200).json({
+  //   code: 20100,
+  //   status: 1,
+  //   data: groupList,
+  //   msg: '群组列表获取成功'
+  // });
 }
 // 获取全部群列表
 const getAllGroupList = async (req, res) => {
@@ -491,8 +481,60 @@ const getChatList = async (req, res,next) => {
     // 获取未读消息数据
     const { getUserUnreadMessages } = require('./optimization');
     const unreadMessages = await getUserUnreadMessages(userId);
-    
+    const PrivateList = await getPrivateList(userId);
+    const GroupList = await getGroupList(userId);
+
     // 将未读消息数据添加到聊天列表中
+    let messagesWithUnread = {private:[], group:[]};
+    PrivateList.forEach(chat => {
+      const senderId = chat._id.toString();
+      const privateUnread = unreadMessages.private.find(item => item?.lastMessage?.senderId === senderId);
+      let newUnread = {}
+      if(privateUnread){
+        newUnread = privateUnread
+      }else{
+        newUnread = {
+          userId: userId,
+          unreadCount: 0,
+          lastMessage: {
+              id: chat.lastMessage._id,
+              content: chat.lastMessage.content,
+              type: chat.lastMessage.type,  
+              sentAt: chat.lastMessage.sentAt,
+              senderName: chat.name,
+              senderImg: chat.img,
+              senderId: chat.lastMessage.receiverId
+          }
+        }
+      }
+      messagesWithUnread.private.push(newUnread)
+    })
+
+    GroupList.forEach(chat => {
+      const groupId = chat._id.toString();
+      const groupUnread = unreadMessages.group.find(item => item?.lastMessage?.groupId === groupId);
+      let newUnread = {}
+      if(groupUnread){
+        newUnread = groupUnread
+      }else{
+        newUnread = {
+          userId: userId,
+          groupId: chat._id,
+          unreadCount: 0,
+          lastMessage: {
+              id: chat.lastMessage._id,
+              content: chat.lastMessage.content,
+              type: chat.lastMessage.type,  
+              sentAt: chat.lastMessage.sentAt,
+              senderName: chat.sender_name,
+              senderImg: '',
+              groupId: chat._id,
+              groupName: chat.name
+          }
+        }
+      }
+      messagesWithUnread.group.push(newUnread)
+    })
     // const messagesWithUnread = messages.map(chat => {
     //   const senderId = chat._id.toString();
     //   const privateUnread = unreadMessages.private.find(item => item.senderId === senderId);
@@ -504,7 +546,7 @@ const getChatList = async (req, res,next) => {
     return res.status(200).json({
       code: 20100,
       status: 1,
-      data: unreadMessages,
+      data: messagesWithUnread,
       msg: '获取聊天列表成功'
     });
   } catch (error) {
