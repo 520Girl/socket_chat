@@ -36,7 +36,7 @@ const FREQUENT_DATA_CACHE_EXPIRY = 60 * 60 * 24 * 7;
 // 冷数据临时缓存过期时间（1小时）
 const COLD_DATA_CACHE_EXPIRY = 60 * 60;
 // 未读消息缓存过期时间（7天）
-const UNREAD_CACHE_EXPIRY = 60 * 60 * 24 * 7;
+// const UNREAD_CACHE_EXPIRY = 60 * 60 * 24 * 7;
 // 心跳超时时间（毫秒）
 const HEARTBEAT_TIMEOUT = 30000; // 30秒
 // 心跳检查间隔（毫秒）
@@ -49,12 +49,12 @@ const DATA_DOWNGRADE_INTERVAL = 3600000; // 1小时
  * @param {Object} socket - Socket.io socket对象
  */
 const heartbeatStart = async (socket) => {
-    if (!socket._id) {
+    if (!socket.data._id) {
         console.log('[Heartbeat] Socket没有关联用户ID');
         return;
     }
 
-    const userId = socket._id;
+    const userId = socket.data._id;
     const socketId = socket.id;
 
     // 在Redis中设置用户心跳状态
@@ -62,10 +62,8 @@ const heartbeatStart = async (socket) => {
     await redis.set(`${REDIS_ONLINE_PREFIX}${userId}`, socketId, 'EX', Math.ceil(HEARTBEAT_TIMEOUT / 1000));
 
     // 更新用户在线状态
-    console.log(`[Heartbeat] 用户sssssssssssssss ${userId} 上线，socketId: ${socketId}`);
-    await User.findByIdAndUpdate(userId, { online: true, lastActive: Date.now(), socketId });
-
-    console.log(`[Heartbeat] 用户 ${userId} 心跳检测已启动`);
+    console.log(`[Heartbeat] 用户 ${userId} 上线，心跳检测已启动,socketId: ${socketId}`);
+    // await User.findByIdAndUpdate(userId, { online: true, lastActive: Date.now(), socketId });
 
     // 监听socket连接的packet事件，处理心跳包
     socket.conn.on('packet', async (packet) => {
@@ -131,14 +129,14 @@ const heartbeatStart = async (socket) => {
 const getOnlineUsers = async () => {
     try {
         // // 获取所有在线用户的键
-        // const keys = await redis.keys(`${REDIS_ONLINE_PREFIX}*`);
+        const keys = await redis.keys(`${REDIS_ONLINE_PREFIX}*`);
 
         // // 提取用户ID
-        // const userIds = keys.map(key => key.replace(REDIS_ONLINE_PREFIX, ''));
+        const userIds = keys.map(key => key.replace(REDIS_ONLINE_PREFIX, ''));
 
-        // return userIds;
+        console.log(`[Heartbeat] 获取在线用户列表: ${userIds}`)
         // 查询在线用户并选择需要的字段
-        const users = await User.find({ online: true })
+        const users = await User.find({ _id: { $in: userIds }})
             .select('name img socketId online')
             .lean();
         return users;
@@ -147,6 +145,19 @@ const getOnlineUsers = async () => {
         return [];
     }
 };
+/**
+ * 获取指定用户ID的在线状态
+ * @param {Object} id
+ */
+const getOnlineStatus = async (id) => {
+    try {
+        const keys = await redis.keys(`${REDIS_ONLINE_PREFIX}${id}`);
+        return keys.length > 0;
+    } catch (error) {
+        console.error('[getOnlineStatus] 获取在线状态错误:', error);
+
+    }
+}
 
 /**
  * socket 事件处理时间监控中间件
@@ -190,7 +201,7 @@ const socketMiddlewareTimer = (io) => {
  * @param {Object} messageData - 消息数据
  * @returns {Promise<Number>} 更新后的未读消息数
  */
-const incrementUnreadCount = async (userId, senderId, messageData) => {
+const incrementUnreadCount = async (userId, senderId, messageData,historyMsg) => {
     try {
         // 用户未读消息计数键
         const unreadKey = `${REDIS_UNREAD_COUNT_PREFIX}${userId}:${senderId}`;
@@ -200,7 +211,7 @@ const incrementUnreadCount = async (userId, senderId, messageData) => {
         const msgHistoryBaseKey = `message:history:${userId}:${senderId}`;
 
         // 添加时间戳，用于数据分层和降级处理
-        messageData.timestamp = Date.now();
+        historyMsg.timestamp = Date.now();
         // 使用MongoDB生成的ID作为唯一标识，而不是手动生成msgId
         const messageId = messageData.id;
 
@@ -211,21 +222,20 @@ const incrementUnreadCount = async (userId, senderId, messageData) => {
         // 高频数据时间阈值（7天内）
         const freqDataThreshold = now - (FREQUENT_DATA_CACHE_EXPIRY * 1000);
 
-        // 原子操作：增加未读计数并设置过期时间
+        //! 3. 原子操作：增加未读计数并设置过期时间 不过期
         const pipeline = redis.pipeline();
         pipeline.incr(unreadKey);
-        pipeline.expire(unreadKey, UNREAD_CACHE_EXPIRY);
+        // pipeline.expire(unreadKey, UNREAD_CACHE_EXPIRY);
 
-        // 1. 存储最后一条消息作为热数据
-        const lastMsgHotDataKey = `${REDIS_HOT_DATA_PREFIX}${lastMsgBaseKey}`;
-        pipeline.set(lastMsgHotDataKey, JSON.stringify(messageData), 'EX', HOT_DATA_CACHE_EXPIRY);
-        console.log(`[数据分层] 存储最后一条消息到热数据层: ${lastMsgHotDataKey}`);
+        //! 1. 存储最后一条消息作为热数据 不过期
+        const lastMsgHotDataKey = `${lastMsgBaseKey}`;
+        pipeline.set(lastMsgHotDataKey, JSON.stringify(messageData));
 
-        // 2. 存储消息到消息历史记录
+
+        //! 2. 存储消息到消息历史记录 过期
         // 消息历史记录键 - 按照数据分层策略存储
         const msgHistoryKey = `${REDIS_HOT_DATA_PREFIX}${msgHistoryBaseKey}:${messageId}`;
-        pipeline.set(msgHistoryKey, JSON.stringify(messageData), 'EX', HOT_DATA_CACHE_EXPIRY);
-        console.log(`[数据分层] 存储消息历史记录到热数据层: ${msgHistoryKey}`);
+        pipeline.set(msgHistoryKey, JSON.stringify(historyMsg), 'EX', HOT_DATA_CACHE_EXPIRY);
 
         // 3. 将消息ID添加到消息历史列表中，用于后续查询
         const historyListKey = `${REDIS_HOT_DATA_PREFIX}${msgHistoryBaseKey}:list`;
@@ -317,25 +327,27 @@ const getDataLayerByTimestamp = (timestamp) => {
 /**
  * 增加群组未读消息计数
  * @param {String} groupId - 群组ID
- * @param {String} userId - 用户ID
+ * @param {String} userId - 用户ID - 发送者用户ID
  * @param {Object} messageData - 消息数据
  * @returns {Promise<Object>} 包含每个成员ID和其未读消息计数的对象
  */
-const incrementGroupUnreadCount = async (groupId, userId, messageData) => {
+const incrementGroupUnreadCount = async (groupId, userId, messageData,historyMsg) => {
     try {
         // 获取群组所有成员
-        const group = await Group.findById(groupId).select('members name');
+        const group = await Group.findById(groupId).select('members name avatar').lean();
+        console.log('群组信息:', group);
         if (!group) return {};
 
         const pipeline = redis.pipeline();
         const memberIds = [];
 
         // 添加时间戳，用于数据分层和降级处理
-        messageData.timestamp = Date.now();
-        // 使用MongoDB生成的ID作为唯一标识，而不是手动生成msgId
+        historyMsg.timestamp = Date.now();
+        // 使用MongoDB生成的ID作为唯一标识
         const messageId = messageData.id;
-        //将群的name 存入数据
-        messageData.groupName = group.name;
+        //最后一条消息需要添加群组信息
+        messageData.groupName = group.name
+        messageData.groupImg = group.avatar
 
         // 当前时间
         const now = Date.now();
@@ -348,7 +360,7 @@ const incrementGroupUnreadCount = async (groupId, userId, messageData) => {
         for (const member of group.members) {
             const memberId = member.user.toString();
             // 跳过消息发送者自己
-            if (memberId === userId) continue;
+            if (memberId === userId.toString()) continue;
 
             memberIds.push(memberId);
 
@@ -359,20 +371,18 @@ const incrementGroupUnreadCount = async (groupId, userId, messageData) => {
             // 消息历史记录键 - 基础键名
             const msgHistoryBaseKey = `group:message:history:${memberId}:${groupId}`;
 
-            // 增加未读计数并设置过期时间
+            //!4. 增加未读计数并设置过期时间
             pipeline.incr(unreadKey);
-            pipeline.expire(unreadKey, UNREAD_CACHE_EXPIRY);
+            // pipeline.expire(unreadKey, UNREAD_CACHE_EXPIRY);
 
-            // 1. 存储最后一条消息作为热数据
-            const lastMsgHotDataKey = `${REDIS_HOT_DATA_PREFIX}${lastMsgBaseKey}`;
-            pipeline.set(lastMsgHotDataKey, JSON.stringify(messageData), 'EX', HOT_DATA_CACHE_EXPIRY);
-            console.log(`[数据分层] 存储群组最后一条消息到热数据层: ${lastMsgHotDataKey}`);
+            //! 1. 存储最后一条消息作为热数据
+            const lastMsgHotDataKey = `${lastMsgBaseKey}`;
+            pipeline.set(lastMsgHotDataKey, JSON.stringify(messageData));
 
-            // 2. 存储消息到消息历史记录
+            //! 2. 存储消息到消息历史记录
             // 消息历史记录键 - 按照数据分层策略存储
             const msgHistoryKey = `${REDIS_HOT_DATA_PREFIX}${msgHistoryBaseKey}:${messageId}`;
-            pipeline.set(msgHistoryKey, JSON.stringify(messageData), 'EX', HOT_DATA_CACHE_EXPIRY);
-            console.log(`[数据分层] 存储群组消息历史记录到热数据层: ${msgHistoryKey}`);
+            pipeline.set(msgHistoryKey, JSON.stringify(historyMsg), 'EX', HOT_DATA_CACHE_EXPIRY);
 
             // 3. 将消息ID添加到消息历史列表中，用于后续查询
             const historyListKey = `${REDIS_HOT_DATA_PREFIX}${msgHistoryBaseKey}:list`;
@@ -398,15 +408,15 @@ const incrementGroupUnreadCount = async (groupId, userId, messageData) => {
         // console.log('[未读消息] 增加群组未读计数结果:', results);
 
         // 返回每个成员的未读计数
-        const unreadCounts = {};
-        let resultIndex = 0;
-        for (const memberId of memberIds) {
-            // 每个成员现在有6个操作：incr, expire, set(最后消息), set(历史消息), lpush, ltrim
-            unreadCounts[memberId] = results[resultIndex][1];
-            resultIndex += 6; // 跳过其他操作的结果
-        }
+        // const unreadCounts = {};
+        // let resultIndex = 0;
+        // for (const memberId of memberIds) {
+        //     // 每个成员现在有6个操作：incr, expire, set(最后消息), set(历史消息), lpush, ltrim
+        //     unreadCounts[memberId] = results[resultIndex][1];
+        //     resultIndex += 6; // 跳过其他操作的结果
+        // }
 
-        return unreadCounts;
+        return group;
     } catch (error) {
         console.error('[未读消息] 增加群组未读计数错误:', error);
         return {};
@@ -446,46 +456,31 @@ const getUserUnreadMessages = async (userId) => {
 
                 // 按照数据分层策略查询消息
                 // 1. 先尝试从热数据层获取
-                const hotDataKey = `${REDIS_HOT_DATA_PREFIX}${REDIS_LAST_MESSAGE_PREFIX}${userId}:${senderId}`;
-                pipeline.get(hotDataKey);
+                // const hotDataKey = `${REDIS_LAST_MESSAGE_PREFIX}${userId}:${senderId}`;
+                // pipeline.get(hotDataKey);
 
-                // 2. 如果热数据不存在，再尝试从高频数据层获取
-                const freqDataKey = `${REDIS_FREQUENT_DATA_PREFIX}${REDIS_LAST_MESSAGE_PREFIX}${userId}:${senderId}`;
-                pipeline.exists(freqDataKey);
+                // // 2. 如果热数据不存在，再尝试从高频数据层获取
+                // const freqDataKey = `${REDIS_LAST_MESSAGE_PREFIX}${userId}:${senderId}`;
+                // pipeline.exists(freqDataKey);
+
+                // 取消最后一条消息高频热评的查询
+                const lastKey = `${REDIS_LAST_MESSAGE_PREFIX}${userId}:${senderId}`
+                pipeline.get(lastKey);
             }
 
             const responses = await pipeline.exec();
-
             // 处理结果
             for (let i = 0; i < privateUnreadKeys.length; i++) {
                 const key = privateUnreadKeys[i];
                 const senderId = key.split(':')[3];
-                const count = parseInt(responses[i * 3][1] || '0');
-
+                const count = parseInt(responses[i * 2][1] || '0');
                 // 检查热数据是否存在
                 let lastMessage = null;
-                if (responses[i * 3 + 1][1]) {
+                if (responses[i * 2 + 1][1]) {
                     // 从热数据获取消息
-                    lastMessage = JSON.parse(responses[i * 3 + 1][1]);
-                } else if (responses[i * 3 + 2][1] === 1) {
-                    // 热数据不存在但高频数据存在，从高频数据获取
-                    const freqDataKey = `${REDIS_FREQUENT_DATA_PREFIX}${REDIS_LAST_MESSAGE_PREFIX}${userId}:${senderId}`;
-                    const freqData = await redis.get(freqDataKey);
-                    if (freqData) {
-                        lastMessage = JSON.parse(freqData);
-
-                        // 将高频数据提升为热数据，提高后续访问速度
-                        await redis.set(
-                            `${REDIS_HOT_DATA_PREFIX}${REDIS_LAST_MESSAGE_PREFIX}${userId}:${senderId}`,
-                            freqData,
-                            'EX',
-                            HOT_DATA_CACHE_EXPIRY
-                        );
-                    }
+                    lastMessage = JSON.parse(responses[i * 2 + 1][1]);
                 }
-
                 // 如果Redis中没有数据，可以从数据库中查询（这里省略实现）
-
                 result.private.push({
                     userId,
                     unreadCount: count,
@@ -509,46 +504,31 @@ const getUserUnreadMessages = async (userId) => {
 
                 // 按照数据分层策略查询消息
                 // 1. 先尝试从热数据层获取
-                const hotDataKey = `${REDIS_HOT_DATA_PREFIX}${REDIS_GROUP_LAST_MESSAGE_PREFIX}${userId}:${groupId}`;
-                pipeline.get(hotDataKey);
+                // const hotDataKey = `${REDIS_GROUP_LAST_MESSAGE_PREFIX}${userId}:${groupId}`;
+                // pipeline.get(hotDataKey);
 
-                // 2. 如果热数据不存在，再尝试从高频数据层获取
-                const freqDataKey = `${REDIS_FREQUENT_DATA_PREFIX}${REDIS_GROUP_LAST_MESSAGE_PREFIX}${userId}:${groupId}`;
-                pipeline.exists(freqDataKey);
+                // // 2. 如果热数据不存在，再尝试从高频数据层获取
+                // const freqDataKey = `${REDIS_GROUP_LAST_MESSAGE_PREFIX}${userId}:${groupId}`;
+                // pipeline.exists(freqDataKey);
+                // 取消最后一条消息高频热评的查询
+                const lastKey = `${REDIS_GROUP_LAST_MESSAGE_PREFIX}${userId}:${groupId}`
+                pipeline.get(lastKey);
             }
 
             const responses = await pipeline.exec();
-
             // 处理结果
             for (let i = 0; i < groupUnreadKeys.length; i++) {
                 const key = groupUnreadKeys[i];
                 const groupId = key.split(':')[3];
-                const count = parseInt(responses[i * 3][1] || '0');
+                const count = parseInt(responses[i * 2 ][1] || '0');
 
                 // 检查热数据是否存在
                 let lastMessage = null;
-                if (responses[i * 3 + 1][1]) {
+                if (responses[i * 2 + 1][1]) {
                     // 从热数据获取消息
-                    lastMessage = JSON.parse(responses[i * 3 + 1][1]);
-                } else if (responses[i * 3 + 2][1] === 1) {
-                    // 热数据不存在但高频数据存在，从高频数据获取
-                    const freqDataKey = `${REDIS_FREQUENT_DATA_PREFIX}${REDIS_GROUP_LAST_MESSAGE_PREFIX}${userId}:${groupId}`;
-                    const freqData = await redis.get(freqDataKey);
-                    if (freqData) {
-                        lastMessage = JSON.parse(freqData);
-
-                        // 将高频数据提升为热数据，提高后续访问速度
-                        await redis.set(
-                            `${REDIS_HOT_DATA_PREFIX}${REDIS_GROUP_LAST_MESSAGE_PREFIX}${userId}:${groupId}`,
-                            freqData,
-                            'EX',
-                            HOT_DATA_CACHE_EXPIRY
-                        );
-                    }
+                    lastMessage = JSON.parse(responses[i * 2 + 1][1]);
                 }
-
                 result.group.push({
-                    userId,
                     groupId,
                     unreadCount: count,
                     lastMessage
@@ -633,21 +613,22 @@ const markGroupMessagesAsRead = async (userId, groupId) => {
 };
 
 // 广播群组未读消息更新的函数
-const broadcastGroupUnreadUpdate = async (io, socket, groupId, senderId, messageData) => {
+const broadcastGroupUnreadUpdate = async (io, socket, groupInfo, senderId, messageData) => {
     try {
-        const group = await Group.findById(groupId).select('members');
-        if (!group) return;
+        if (!groupInfo) return;
+        const groupId = groupInfo._id;
 
         // 使用管道批量处理Redis操作，提高性能
         const pipeline = redis.pipeline();
         const members = [];
 
-        for (const member of group.members) {
+        for (const member of groupInfo.members) {
             const memberId = member.user.toString();
 
+            
             // 跳过消息发送者自己
-            if (memberId === senderId) continue;
-
+            if (memberId === senderId.toString()) continue;
+            console.log(`[未读消息] 用户 ${memberId} 接收到群组 ${groupId} 的消息,${senderId.toString()}`)
             members.push(memberId);
             // 获取该成员的未读消息计数
             const unreadKey = `${REDIS_GROUP_UNREAD_PREFIX}${memberId}:${groupId}`;
@@ -679,9 +660,9 @@ const broadcastGroupUnreadUpdate = async (io, socket, groupId, senderId, message
                 io.to(user.socketId).emit(SocketOnGroupUnreadUpdate, {
                     groupId,
                     unreadCount: unreadCount,
-                    lastMessage: messageData.content,
-                    senderName: messageData.senderName || '',
-                    timestamp: Date.now()
+                    groupName:groupInfo.name,
+                    groupImg:groupInfo.avatar,
+                    ...messageData
                 });
 
                 console.log(`[未读消息] 已向用户 ${memberId} 推送群组 ${groupId} 的未读消息更新`);
@@ -706,6 +687,7 @@ module.exports = {
     HOT_DATA_CACHE_EXPIRY,
     FREQUENT_DATA_CACHE_EXPIRY,
     COLD_DATA_CACHE_EXPIRY,
+    DATA_DOWNGRADE_INTERVAL,
     incrementUnreadCount,
     incrementGroupUnreadCount,
     getUserUnreadMessages,
@@ -714,5 +696,6 @@ module.exports = {
     broadcastGroupUnreadUpdate,
     downgradeHotData,
     downgradeFrequentData,
-    getDataLayerByTimestamp
+    getDataLayerByTimestamp,
+    getOnlineStatus
 }

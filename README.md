@@ -25,14 +25,15 @@
 - 一对一实时通讯
 - 私聊消息持久化存储
 - 发送者和接收者信息关联
-- 支持文本消息类型
+- 支持多种消息类型（文本/图片/语音/位置）
 
 ### 4. 消息管理
 
 - 消息实时发送和接收
 - 消息持久化存储
-- 支持多种消息类型（文本/图片/文件）
+- 支持多种消息类型（文本/图片/语音/位置/文件）
 - 消息发送时间记录
+- 多媒体内容存储与管理
 
 ## 技术亮点
 
@@ -71,7 +72,7 @@
 - 添加消息加密功能
 - 实现离线消息推送
 - 增加消息撤回功能
-- 支持更多媒体类型
+- 支持更多媒体类型（已实现图片/语音/位置）
 - 未读消息计数与实时推送（已实现）
 
 ### 2. 性能优化
@@ -96,6 +97,200 @@
 2. **可靠性**：即使在网络波动或服务器重启的情况下，也能准确维护用户状态
 3. **分布式支持**：支持多服务器部署，所有节点共享用户状态信息
 4. **性能优化**：减轻数据库负担，提高系统响应速度
+
+## 多媒体消息支持方案
+
+### 1. 图片聊天功能
+
+#### 数据模型
+
+扩展现有消息模型，添加图片类型支持：
+
+```javascript
+// 在消息模型中添加图片类型
+type: {
+    type: String,
+    enum: ['text', 'image', 'audio', 'location', 'file'],
+    default: 'text'
+},
+// 图片相关字段
+mediaUrl: String,       // 图片URL
+thumbnailUrl: String,   // 缩略图URL
+```
+
+#### 实现流程
+
+1. **前端**：
+   - 图片选择/拍照功能
+   - 图片压缩和预览
+   - 上传进度显示
+   - 图片消息气泡设计
+
+2. **后端**：
+   - 文件上传服务
+   - 图片存储和管理
+   - 缩略图生成
+   - 图片消息处理
+
+3. **消息格式**：
+```javascript
+{
+    type: 'image',
+    content: '图片描述（可选）',
+    mediaUrl: '/uploads/images/image123.jpg',
+    thumbnailUrl: '/uploads/images/thumbnails/image123_thumb.jpg'
+}
+```
+
+### 2. 语音消息功能
+
+#### 数据模型
+
+扩展现有消息模型，添加语音类型支持：
+
+```javascript
+// 在消息模型中添加语音类型
+type: {
+    type: String,
+    enum: ['text', 'image', 'audio', 'location', 'file'],
+    default: 'text'
+},
+// 语音相关字段
+mediaUrl: String,       // 语音文件URL
+mediaDuration: Number,  // 语音时长（秒）
+```
+
+#### 实现流程
+
+1. **前端**：
+   - 录音功能实现
+   - 语音波形动画
+   - 播放控制
+   - 语音消息气泡设计
+
+2. **后端**：
+   - 语音文件上传服务
+   - 语音文件存储和管理
+   - 语音消息处理
+
+3. **消息格式**：
+```javascript
+{
+    type: 'audio',
+    content: '',  // 通常为空
+    mediaUrl: '/uploads/audio/voice123.mp3',
+    mediaDuration: 15  // 15秒
+}
+```
+
+### 3. 地理位置共享功能
+
+#### 数据模型
+
+扩展现有消息模型，添加位置类型支持：
+
+```javascript
+// 在消息模型中添加位置类型
+type: {
+    type: String,
+    enum: ['text', 'image', 'audio', 'location', 'file'],
+    default: 'text'
+},
+// 位置相关字段
+locationData: {
+    latitude: Number,    // 纬度
+    longitude: Number,   // 经度
+    address: String,     // 地址描述
+    name: String         // 位置名称
+}
+```
+
+#### 实现流程
+
+1. **前端**：
+   - 集成地图SDK（如高德、百度等）
+   - 位置选择界面
+   - 位置消息气泡设计
+   - 查看位置详情和导航功能
+
+2. **后端**：
+   - 地理位置数据处理
+   - 地理编码服务（坐标转地址）
+   - 位置消息处理
+
+3. **消息格式**：
+```javascript
+{
+    type: 'location',
+    content: '我在这里',  // 可选描述
+    locationData: {
+        latitude: 39.9042,
+        longitude: 116.4074,
+        address: '北京市东城区天安门',
+        name: '天安门'
+    }
+}
+```
+
+### 4. 文件上传服务实现
+
+```javascript
+// 文件上传配置
+const multer = require('multer');
+const path = require('path');
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const mediaType = req.body.mediaType || 'misc';
+        const dir = path.join(__dirname, '../uploads', mediaType);
+        // 确保目录存在
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const ext = path.extname(file.originalname);
+        cb(null, uniqueSuffix + ext);
+    }
+});
+
+const upload = multer({ 
+    storage,
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB限制
+});
+
+// 文件上传路由
+router.post('/upload', upload.single('media'), async (req, res) => {
+    // 处理文件上传并返回URL
+});
+```
+
+### 5. Socket消息处理扩展
+
+```javascript
+// 扩展私聊消息处理
+socket.on(SocketEmitPrivate, async ({ toUid, msg, type, mediaUrl, mediaDuration, thumbnailUrl, locationData }) => {
+    // 根据消息类型处理不同的多媒体内容
+    // 创建消息并发送给接收者
+});
+
+// 扩展群聊消息处理
+socket.on(SocketEmitGroupMsg, async ({ groupId, senderId, content, type, mediaUrl, mediaDuration, thumbnailUrl, locationData }) => {
+    // 根据消息类型处理不同的多媒体内容
+    // 创建消息并广播给群组成员
+});
+```
+
+### 6. 注意事项
+
+1. **文件存储安全**：确保上传的文件经过安全检查，防止恶意文件上传
+2. **文件大小限制**：设置合理的文件大小限制，防止服务器存储压力
+3. **CDN考虑**：对于生产环境，考虑使用CDN存储和分发媒体文件
+4. **隐私保护**：对于位置信息，确保用户隐私保护
+5. **兼容性**：确保在各种设备和浏览器上的兼容性
+6. **离线支持**：考虑消息的离线存储和同步机制
 
 #### 实现原理
 
@@ -128,6 +323,200 @@
 3. **实时推送**：通过WebSocket实时推送未读消息计数和最新消息
 4. **分布式支持**：支持多服务器部署，保持未读计数的一致性
 5. **自动过期**：设置合理的缓存过期时间，优化内存使用
+
+## 多媒体消息支持方案
+
+### 1. 图片聊天功能
+
+#### 数据模型
+
+扩展现有消息模型，添加图片类型支持：
+
+```javascript
+// 在消息模型中添加图片类型
+type: {
+    type: String,
+    enum: ['text', 'image', 'audio', 'location', 'file'],
+    default: 'text'
+},
+// 图片相关字段
+mediaUrl: String,       // 图片URL
+thumbnailUrl: String,   // 缩略图URL
+```
+
+#### 实现流程
+
+1. **前端**：
+   - 图片选择/拍照功能
+   - 图片压缩和预览
+   - 上传进度显示
+   - 图片消息气泡设计
+
+2. **后端**：
+   - 文件上传服务
+   - 图片存储和管理
+   - 缩略图生成
+   - 图片消息处理
+
+3. **消息格式**：
+```javascript
+{
+    type: 'image',
+    content: '图片描述（可选）',
+    mediaUrl: '/uploads/images/image123.jpg',
+    thumbnailUrl: '/uploads/images/thumbnails/image123_thumb.jpg'
+}
+```
+
+### 2. 语音消息功能
+
+#### 数据模型
+
+扩展现有消息模型，添加语音类型支持：
+
+```javascript
+// 在消息模型中添加语音类型
+type: {
+    type: String,
+    enum: ['text', 'image', 'audio', 'location', 'file'],
+    default: 'text'
+},
+// 语音相关字段
+mediaUrl: String,       // 语音文件URL
+mediaDuration: Number,  // 语音时长（秒）
+```
+
+#### 实现流程
+
+1. **前端**：
+   - 录音功能实现
+   - 语音波形动画
+   - 播放控制
+   - 语音消息气泡设计
+
+2. **后端**：
+   - 语音文件上传服务
+   - 语音文件存储和管理
+   - 语音消息处理
+
+3. **消息格式**：
+```javascript
+{
+    type: 'audio',
+    content: '',  // 通常为空
+    mediaUrl: '/uploads/audio/voice123.mp3',
+    mediaDuration: 15  // 15秒
+}
+```
+
+### 3. 地理位置共享功能
+
+#### 数据模型
+
+扩展现有消息模型，添加位置类型支持：
+
+```javascript
+// 在消息模型中添加位置类型
+type: {
+    type: String,
+    enum: ['text', 'image', 'audio', 'location', 'file'],
+    default: 'text'
+},
+// 位置相关字段
+locationData: {
+    latitude: Number,    // 纬度
+    longitude: Number,   // 经度
+    address: String,     // 地址描述
+    name: String         // 位置名称
+}
+```
+
+#### 实现流程
+
+1. **前端**：
+   - 集成地图SDK（如高德、百度等）
+   - 位置选择界面
+   - 位置消息气泡设计
+   - 查看位置详情和导航功能
+
+2. **后端**：
+   - 地理位置数据处理
+   - 地理编码服务（坐标转地址）
+   - 位置消息处理
+
+3. **消息格式**：
+```javascript
+{
+    type: 'location',
+    content: '我在这里',  // 可选描述
+    locationData: {
+        latitude: 39.9042,
+        longitude: 116.4074,
+        address: '北京市东城区天安门',
+        name: '天安门'
+    }
+}
+```
+
+### 4. 文件上传服务实现
+
+```javascript
+// 文件上传配置
+const multer = require('multer');
+const path = require('path');
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const mediaType = req.body.mediaType || 'misc';
+        const dir = path.join(__dirname, '../uploads', mediaType);
+        // 确保目录存在
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const ext = path.extname(file.originalname);
+        cb(null, uniqueSuffix + ext);
+    }
+});
+
+const upload = multer({ 
+    storage,
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB限制
+});
+
+// 文件上传路由
+router.post('/upload', upload.single('media'), async (req, res) => {
+    // 处理文件上传并返回URL
+});
+```
+
+### 5. Socket消息处理扩展
+
+```javascript
+// 扩展私聊消息处理
+socket.on(SocketEmitPrivate, async ({ toUid, msg, type, mediaUrl, mediaDuration, thumbnailUrl, locationData }) => {
+    // 根据消息类型处理不同的多媒体内容
+    // 创建消息并发送给接收者
+});
+
+// 扩展群聊消息处理
+socket.on(SocketEmitGroupMsg, async ({ groupId, senderId, content, type, mediaUrl, mediaDuration, thumbnailUrl, locationData }) => {
+    // 根据消息类型处理不同的多媒体内容
+    // 创建消息并广播给群组成员
+});
+```
+
+### 6. 注意事项
+
+1. **文件存储安全**：确保上传的文件经过安全检查，防止恶意文件上传
+2. **文件大小限制**：设置合理的文件大小限制，防止服务器存储压力
+3. **CDN考虑**：对于生产环境，考虑使用CDN存储和分发媒体文件
+4. **隐私保护**：对于位置信息，确保用户隐私保护
+5. **兼容性**：确保在各种设备和浏览器上的兼容性
+6. **离线支持**：考虑消息的离线存储和同步机制
 
 #### 实现原理
 

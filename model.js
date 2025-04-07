@@ -59,8 +59,18 @@ const groupMessageSchema = new mongoose.Schema({
     content: String, // 消息内容
     type: {
         type: String,
-        enum: ['text', 'image', 'file'], // 限制消息类型
+        enum: ['text', 'image', 'audio', 'location', 'file'], // 扩展消息类型
         default: 'text' // 默认文本消息
+    },
+    // 多媒体内容字段
+    mediaUrl: String,         // 媒体文件URL
+    mediaDuration: Number,    // 语音消息持续时间（秒）
+    thumbnailUrl: String,     // 图片缩略图URL
+    locationData: {           // 地理位置数据
+        latitude: Number,     // 纬度
+        longitude: Number,    // 经度
+        address: String,      // 地址描述
+        name: String          // 位置名称
     },
     sentAt: {
         type: Date,
@@ -84,8 +94,18 @@ const privateMessageSchema = new mongoose.Schema({
     content: String, // 消息内容
     type: {
         type: String,
-        enum: ['text', 'image', 'file'], // 限制消息类型
+        enum: ['text', 'image', 'audio', 'location', 'file'], // 扩展消息类型
         default: 'text' // 默认文本消息
+    },
+    // 多媒体内容字段
+    mediaUrl: String,         // 媒体文件URL
+    mediaDuration: Number,    // 语音消息持续时间（秒）
+    thumbnailUrl: String,     // 图片缩略图URL
+    locationData: {           // 地理位置数据
+        latitude: Number,     // 纬度
+        longitude: Number,    // 经度
+        address: String,      // 地址描述
+        name: String          // 位置名称
     },
     sentAt: {
         type: Date,

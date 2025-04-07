@@ -1,6 +1,8 @@
 const router = require('express').Router();
 const { User, Group, GroupMessage, PrivateMessage } = require('./model');
 const mongoose = require('mongoose');
+const {selectType}= require('./dataType')
+const { getMessageHistory } = require('./dataLayerManager');
 
 
 const login = async (req, res, next) => {
@@ -352,8 +354,8 @@ const sendGroupMessage = async (req, res) => {
 
 // 获取群消息历史
 const getGroupMessages = async (req, res) => {
-  const { groupId } = req.query;
-
+  const { groupId} = req.query;
+  // 直接从mongodb 获取
   const messages = await GroupMessage.find({ group: groupId })
     .sort({ sentAt: 1 })
     .populate('sender', 'name img');
@@ -491,19 +493,23 @@ const getChatList = async (req, res,next) => {
       const privateUnread = unreadMessages.private.find(item => item?.lastMessage?.senderId === senderId);
       let newUnread = {}
       if(privateUnread){
-        newUnread = privateUnread
+        newUnread = {
+          userId, //被聊天者id
+          unreadCount: privateUnread.unreadCount,
+          lastMessage: privateUnread.lastMessage
+        }
       }else{
         newUnread = {
-          userId: userId,
+          userId,
           unreadCount: 0,
           lastMessage: {
               id: chat.lastMessage._id,
-              content: chat.lastMessage.content,
-              type: chat.lastMessage.type,  
-              sentAt: chat.lastMessage.sentAt,
               senderName: chat.name,
               senderImg: chat.img,
-              senderId: chat.lastMessage.receiverId
+              isRead:true,
+              senderId:chat.lastMessage.receiverId,
+              ...selectType(chat.type,chat.lastMessage),
+              sentAt: chat.lastMessage.sentAt,
           }
         }
       }
@@ -512,37 +518,31 @@ const getChatList = async (req, res,next) => {
 
     GroupList.forEach(chat => {
       const groupId = chat._id.toString();
-      const groupUnread = unreadMessages.group.find(item => item?.lastMessage?.groupId === groupId);
+      const groupUnread = unreadMessages.group.find(item => item?.groupId === groupId);
       let newUnread = {}
       if(groupUnread){
-        newUnread = groupUnread
+        newUnread = {
+          groupId,
+          unreadCount: groupUnread.unreadCount,
+          lastMessage: groupUnread.lastMessage
+        }
       }else{
         newUnread = {
-          userId: userId,
           groupId: chat._id,
           unreadCount: 0,
           lastMessage: {
               id: chat.lastMessage._id,
-              content: chat.lastMessage.content,
-              type: chat.lastMessage.type,  
+              ...selectType(chat.type,chat.lastMessage),
               sentAt: chat.lastMessage.sentAt,
-              senderName: chat.sender_name,
-              senderImg: '',
-              groupId: chat._id,
+              senderName: chat.lastMessage.sender_name,
+              isRead:true,
+              groupImg: chat.avatar,
               groupName: chat.name
           }
         }
       }
       messagesWithUnread.group.push(newUnread)
     })
-    // const messagesWithUnread = messages.map(chat => {
-    //   const senderId = chat._id.toString();
-    //   const privateUnread = unreadMessages.private.find(item => item.senderId === senderId);
-    //   return {
-    //     ...chat,
-    //     unreadCount: privateUnread ? privateUnread.unreadCount : 0
-    //   };
-    // });
     return res.status(200).json({
       code: 20100,
       status: 1,
@@ -552,6 +552,42 @@ const getChatList = async (req, res,next) => {
   } catch (error) {
 next(error);
 }
+}
+
+//? 查询工人和群聊天记录
+const getAllChatMessages = async (req, res, next) => {
+  const { userId, chatId } = req.query;
+  const pageSize = parseInt(req.query.pageSize) || 20;  // 默认20条
+  const page = parseInt(req.query.page) || 1;  // 默认第1页
+  const isGroup = req.query.isGroup == 'true';  // 转换为布尔值
+  const {messages,total} = await getMessageHistory(userId, chatId,isGroup,pageSize,page);
+  const users = await User.find().select('name img').lean();
+  // console.log('messages',users)
+  // 直接从mongodb 获取
+  // const messages = await GroupMessage.find({ group: groupId })
+  //   .sort({ sentAt: 1 })
+  //   .populate('sender', 'name img');
+  if(isGroup != true){
+    messages.forEach(message => {
+      const user = users.find(user => user._id?.toString() === message.sender?.toString());
+      message.img = user?.img;
+    })
+  }else{
+    messages.forEach(message => {
+      const user = users.find(user => user._id?.toString() === message.sender?.toString());
+      message.img = user?.img;
+      message.name = user?.name;
+    })
+  }
+  return res.status(200).json({
+    code: 20100,
+    status: 1,
+    data: messages,
+    total,
+    page,
+    pageSize,
+    msg: '获取群消息成功'
+  });
 }
 
 
@@ -564,5 +600,6 @@ router.get('/unread', getUnreadMessages);
 router.post('/markPrivateRead', markPrivateRead);
 router.post('/group/markGroupRead', markGroupRead);
 router.post('/chatList', getChatList);
+router.get('/chatMessages', getAllChatMessages);
 
 module.exports = router

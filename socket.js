@@ -10,16 +10,17 @@ const {
     GetEmitOnlineUsers, OnlineUsersList,
     SocketHeartBeat, SocketEmitTempLeaveGroup,
     SocketOnTempLeaveGroup, SocketEmitGetUnreadCount,
-    SocketEmitMarkPrivateRead, SocketEmitMarkGroupRead,
+    SocketEmitMarkRead, SocketToMarkRead,
     SocketOnUnreadCountUpdate, SocketOnGroupUnreadUpdate
 } = require('./constants');
+const {selectType} = require('./dataType');
 const { User, PrivateMessage, Group, GroupMessage } = require('./model');
 const {
     heartbeatStart, getOnlineUsers, socketMiddlewareTimer,
     REDIS_HEARTBEAT_PREFIX, REDIS_ONLINE_PREFIX, REDIS_GROUP_UNREAD_PREFIX,
     incrementUnreadCount, incrementGroupUnreadCount,
     getUserUnreadMessages, markPrivateMessagesAsRead, markGroupMessagesAsRead,
-    broadcastGroupUnreadUpdate
+    broadcastGroupUnreadUpdate,getOnlineStatus
 } = require('./optimization');
 const { getMessageHistory } = require('./dataLayerManager');
 module.exports = (httpServer, core) => {
@@ -30,27 +31,36 @@ module.exports = (httpServer, core) => {
 
     io.on('connection', (socket) => {
         console.log('创建了一个socket连接');
-
         //! 用户连接时记录用户信息
         // 这个方案预留了可以登录用户创建 用户的功能
         socket.on(SocketEmitUserConnect, async ({ name, img, _id }) => {
             try {
-                let user = await User.findById(_id);
-                socket._id = _id;
-                if (!user) {
-                    user = await User.create({
+
+                // 使用 findByIdAndUpdate 同时更新并返回更新后的文档
+                let user = await User.findByIdAndUpdate(
+                    _id,{
                         name,
                         img,
                         online: true,
-                        socketId: socket.id
-                    })
-                }
+                        socketId: socket.id,
+                        lastActive: Date.now()
+                    },{ 
+                        new: true,  // 返回更新后的文档
+                        upsert: true,  // 如果文档不存在则创建
+                        setDefaultsOnInsert: true  // 在创建新文档时应用 schema 默认值
+                    }
+                );
+                socket.data._id = user._id;
+                socket.data.name = user.name;
+                socket.data.img = user.img;
+                socket.data.online = user.online;
+
                 // 启动心跳检测 并处理用户信息
                 await heartbeatStart(socket);
 
                 //获取所有在线用户
                 const onlineUsers = await getOnlineUsers();
-
+                // 广播最新的用户列表
                 // 广播最新的用户列表 
                 //该方法会把所有用户都收到包括自己
                 io.emit(OnlineUsersList, {
@@ -63,60 +73,66 @@ module.exports = (httpServer, core) => {
         })
 
         //!一对一聊天
-        socket.on(SocketEmitPrivate, async ({ toUid, msg }) => {
+        socket.on(SocketEmitPrivate, async ({ id,data }) => {
             try {
-                console.log('发送消息:', toUid, msg, socket.id);
-                //查询发送者和接收者（使用一次查询）
-                const [sender, receiver] = await Promise.all([
-                    User.findOne({ socketId: socket.id }),
-                    User.findById(toUid)
-                ]);
+                const { content = '', type='text', mediaUrl='', mediaDuration=0, thumbnailUrl='', locationData=null } = data;
+                //接收者（使用一次查询）
+                const receiver = await User.findById(id).lean()
 
-                if (!sender || !receiver) return;
-
-                // 存储私聊消息到数据库
-                const message = await PrivateMessage.create({
-                    sender: sender._id,
-                    receiver: receiver._id,
-                    content: msg,
-                    type: 'text'
-                });
-
-                // 准备消息数据
+                if (!receiver) return;
+                const selectTypeMsg = selectType(type, data)
+                // 创建消息对象 存在mongodb数据库中的
                 const messageData = {
-                    id: message._id,
-                    content: msg,
-                    type: 'text',
-                    sentAt: message.sentAt,
-                    senderName: sender.name,
-                    senderImg: sender.img,
+                    sender: socket.data._id,
+                    receiver: receiver._id,
+                    ...selectTypeMsg
                 };
 
-                // 如果接收者在线，发送消息
-                if (receiver.online && receiver.socketId) {
-                    socket.to(receiver.socketId).emit(SocketOnPrivate, {
-                        from: sender._id,
-                        // to: receiver._id,
-                        name: sender.name,
-                        img: sender.img,
-                        msg,
+
+                // 存储私聊消息到数据库
+                const message = await PrivateMessage.create(messageData);
+                console.log('[SocketEmitPrivate] 存储私聊消息到数据库', message);
+
+                // 准备消息数据
+                const socketMessageData = {
+                    // id: socket.data._id,
+                    name: socket.data.name,
+                    img: socket.data.img,
+                    sentAt: message.sentAt,
+                    ...selectTypeMsg
+                };
+
+
+                // 如果接收者在线，发送消息，这个在线状态应该从redis数据库中
+                const online = await getOnlineStatus(id)
+                console.log('[SocketEmitPrivate] 接收者是否在线', online);
+                if (online && receiver.socketId) {
+                    socket.to(receiver.socketId).emit(SocketOnPrivate, socketMessageData);
+                }
+
+                // 无论接收者是否在线，都增加未读消息计数 //2
+                const unreadCount = await incrementUnreadCount(id,socket.data._id,{
+                    id:message._id,
+                    ...selectTypeMsg,
+                    senderName:socket.data.name,
+                    senderImg:socket.data.img,
+                    sentAt:message.sentAt,
+                    isRead:false
+                },message);
+
+                // 如果接收者在线，发送未读消息计数更新
+                if (online && receiver.socketId) {
+                    io.to(receiver.socketId).emit(SocketOnUnreadCountUpdate, {
+                        senderId: socket.data._id,
+                        senderName: socket.data.name,
+                        senderImg: socket.data.img,
+                        unreadCount,
+                        content: message.content,
                         sentAt: message.sentAt
                     });
                 }
 
-                // 无论接收者是否在线，都增加未读消息计数 //2
-                const unreadCount = await incrementUnreadCount(receiver._id.toString(), sender._id.toString(), messageData);
-
-                // 如果接收者在线，发送未读消息计数更新
-                if (receiver.online && receiver.socketId) {
-                    io.to(receiver.socketId).emit(SocketOnUnreadCountUpdate, {
-                        senderId: sender._id,
-                        unreadCount,
-                        lastMessage: messageData.content
-                    });
-                }
-
-                console.log(`私聊消息: ${sender.name} -> ${receiver.name}: ${msg} (未读: ${unreadCount})`);
+                console.log(`私聊消息: ${socket.name} -> ${receiver.name}: ${content} (未读: ${unreadCount})`);
             } catch (e) {
                 console.error('发送私聊消息错误:', e);
             }
@@ -124,46 +140,50 @@ module.exports = (httpServer, core) => {
 
         //!群组聊天
         //todo 监听群消息
-        socket.on(SocketEmitGroupMsg, async ({ groupId, senderId, content }) => {
+        socket.on(SocketEmitGroupMsg, async ({ groupId, data }) => {
             try {
-                // 并行处理消息存储和用户查询
-                const [message, sender] = await Promise.all([
-                    GroupMessage.create({
-                        group: groupId,
-                        sender: senderId,
-                        content
-                    }),
-                    User.findById(senderId).select('name img')
-                ]);
+                const { content = '', type='text', mediaUrl='', mediaDuration=0, thumbnailUrl='', locationData=null } = data;
 
-                // 准备消息数据
+                console.log(`[SocketEmitGroupMsg] 群组${type || 'text'}消息:${socket.data.name} -> ${groupId}: ${content}`);
+                const selectTypeMsg = selectType(type, data)
+
+                // 创建消息对象
                 const messageData = {
-                    id: message._id,
-                    content,
-                    type: message.type || 'text',
-                    sentAt: message.sentAt,
-                    senderName: sender.name,
-                    senderImg: sender.img,
-                    groupId
+                    group: groupId,
+                    sender: socket.data._id,
+                    ...selectTypeMsg
                 };
 
-                // 增加群组未读消息计数
-                await incrementGroupUnreadCount(groupId, senderId, messageData);
+                // 并行处理消息存储和用户查询
+                const message = await GroupMessage.create(messageData)
 
-                console.log(`群消息: ${sender.name} -> ${groupId}: ${content}`);
+                // 准备消息数据
+                const socketMessageData = {
+                    name: socket.data.name,
+                    img: socket.data.img,
+                    sentAt: message.sentAt,
+                    ...selectTypeMsg
+                };
+
+
+                // 增加群组未读消息计数
+                const groupInfo = await incrementGroupUnreadCount(groupId, socket.data._id, {
+                    id:message._id,
+                    ...selectTypeMsg,
+                    senderName:socket.data.name,
+                    sentAt:message.sentAt,
+                    isRead:false
+                },message);
+
                 // 广播给群组内所有成员
-                socket.to(`group-${groupId}`).emit(SocketOnGroupMsg, {
-                    content,
-                    sendAt: message.sentAt,
-                    img: sender.img,
-                    sender: {
-                        _id: senderId,
-                        name: sender.name
-                    }
-                });
+                socket.to(`group-${groupId}`).emit(SocketOnGroupMsg, socketMessageData);
 
                 // 调用抽取出来的广播未读消息更新函数
-                await broadcastGroupUnreadUpdate(io,socket, groupId, senderId, messageData);
+                await broadcastGroupUnreadUpdate(io, socket, groupInfo, socket.data._id, {
+                    ...selectTypeMsg,
+                    senderName: socket.data.name,
+                    sentAt: message.sentAt,
+                });
 
             } catch (e) {
                 console.error('群消息发送错误:', e);
@@ -236,7 +256,7 @@ module.exports = (httpServer, core) => {
         // 获取未读消息计数
         socket.on(SocketEmitGetUnreadCount, async () => {
             try {
-                if (!socket._id) return;
+                if (!socket.data._id) return;
 
                 // 获取用户所有未读消息
                 const unreadMessages = await getUserUnreadMessages(socket._id);
@@ -250,31 +270,23 @@ module.exports = (httpServer, core) => {
             }
         });
 
-        // 标记私聊消息为已读
-        socket.on(SocketEmitMarkPrivateRead, async ({ senderId }) => {
+        // 标记私聊群聊消息为已读
+        socket.on(SocketEmitMarkRead, async ({ type,senderId,groupId }) => {
             try {
-                if (!socket._id || !senderId) return;
-
-                await markPrivateMessagesAsRead(socket._id, senderId);
-
-                console.log(`[未读消息] 用户 ${socket._id} 标记来自 ${senderId} 的私聊消息为已读`);
+                if (!socket.data._id && (!groupId || !senderId)) return;
+                if (type === 'private') {
+                    console.log('[未读消息] 标记私聊消息已读', type,senderId,socket.data._id,groupId);
+                    await markPrivateMessagesAsRead(socket.data._id, senderId);
+                    socket.emit(SocketToMarkRead, { type,senderId });
+                }else{
+                    await markGroupMessagesAsRead(socket.data._id, groupId);
+                    socket.emit(SocketToMarkRead, { type,groupId});
+                }
             } catch (error) {
                 console.error('[未读消息] 标记私聊消息已读错误:', error);
             }
         });
 
-        // 标记群组消息为已读
-        socket.on(SocketEmitMarkGroupRead, async ({ groupId }) => {
-            try {
-                if (!socket._id || !groupId) return;
-
-                await markGroupMessagesAsRead(socket._id, groupId);
-
-                console.log(`[未读消息] 用户 ${socket._id} 标记群组 ${groupId} 的消息为已读`);
-            } catch (error) {
-                console.error('[未读消息] 标记群组消息已读错误:', error);
-            }
-        });
 
         socket.on('disconnect', async () => {
             try {
@@ -331,22 +343,22 @@ module.exports = (httpServer, core) => {
         //     console.log('EmitGroupUnreadUpdate', groupId, senderId, content)
         //     await broadcastGroupUnreadUpdate(socket, groupId, senderId, {content:content}) 
         // })
-        
+
         // 获取消息历史记录
         socket.on('GetMessageHistory', async ({ chatId, isGroup, limit }) => {
             try {
                 if (!socket._id) return;
-                
+
                 // 使用数据分层缓存策略获取消息历史
                 const messages = await getMessageHistory(socket._id, chatId, isGroup, limit || 20);
-                
+
                 // 发送消息历史给客户端
                 socket.emit('MessageHistory', {
                     chatId,
                     isGroup,
                     messages
                 });
-                
+
                 console.log(`[消息历史] 用户 ${socket._id} 获取${isGroup ? '群组' : '私聊'}消息历史: ${chatId}, 共 ${messages.length} 条`);
             } catch (error) {
                 console.error('[消息历史] 获取消息历史错误:', error);
