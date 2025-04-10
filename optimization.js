@@ -136,7 +136,7 @@ const getOnlineUsers = async () => {
 
         console.log(`[Heartbeat] 获取在线用户列表: ${userIds}`)
         // 查询在线用户并选择需要的字段
-        const users = await User.find({ _id: { $in: userIds }})
+        const users = await User.find({ _id: { $in: userIds } })
             .select('name img socketId online')
             .lean();
         return users;
@@ -201,14 +201,16 @@ const socketMiddlewareTimer = (io) => {
  * @param {Object} messageData - 消息数据
  * @returns {Promise<Number>} 更新后的未读消息数
  */
-const incrementUnreadCount = async (userId, senderId, messageData,historyMsg) => {
+const incrementUnreadCount = async (userId, senderId, messageData, historyMsg) => {
     try {
         // 用户未读消息计数键
         const unreadKey = `${REDIS_UNREAD_COUNT_PREFIX}${userId}:${senderId}`;
         // 用户最后一条消息键 - 基础键名
         const lastMsgBaseKey = `${REDIS_LAST_MESSAGE_PREFIX}${userId}:${senderId}`;
-        // 消息历史记录键 - 基础键名
-        const msgHistoryBaseKey = `message:history:${userId}:${senderId}`;
+        // 消息历史记录键 - 基础键名（接收者视角）
+        const receiverMsgHistoryBaseKey = `user:message:history:${userId}:${senderId}`;
+        // 消息历史记录键 - 基础键名（发送者视角）
+        const senderMsgHistoryBaseKey = `user:message:history:${senderId}:${userId}`;
 
         // 添加时间戳，用于数据分层和降级处理
         historyMsg.timestamp = Date.now();
@@ -232,17 +234,28 @@ const incrementUnreadCount = async (userId, senderId, messageData,historyMsg) =>
         pipeline.set(lastMsgHotDataKey, JSON.stringify(messageData));
 
 
-        //! 2. 存储消息到消息历史记录 过期
-        // 消息历史记录键 - 按照数据分层策略存储
-        const msgHistoryKey = `${REDIS_HOT_DATA_PREFIX}${msgHistoryBaseKey}:${messageId}`;
-        pipeline.set(msgHistoryKey, JSON.stringify(historyMsg), 'EX', HOT_DATA_CACHE_EXPIRY);
+        //! 2. 存储消息到消息历史记录 过期 - 同时为接收者和发送者创建索引
+        // 接收者视角 - 消息历史记录键
+        const receiverMsgHistoryKey = `${REDIS_HOT_DATA_PREFIX}${receiverMsgHistoryBaseKey}:${messageId}`;
+        pipeline.set(receiverMsgHistoryKey, JSON.stringify(historyMsg), 'EX', HOT_DATA_CACHE_EXPIRY);
 
-        // 3. 将消息ID添加到消息历史列表中，用于后续查询
-        const historyListKey = `${REDIS_HOT_DATA_PREFIX}${msgHistoryBaseKey}:list`;
-        pipeline.lpush(historyListKey, messageId);
-        pipeline.expire(historyListKey, HOT_DATA_CACHE_EXPIRY);
-        // 限制列表长度，避免过长
-        pipeline.ltrim(historyListKey, 0, 99); // 保留最近100条消息ID
+        // 发送者视角 - 消息历史记录键
+        const senderMsgHistoryKey = `${REDIS_HOT_DATA_PREFIX}${senderMsgHistoryBaseKey}:${messageId}`;
+        pipeline.set(senderMsgHistoryKey, JSON.stringify(historyMsg), 'EX', HOT_DATA_CACHE_EXPIRY);
+
+        // 3. 将消息ID添加到消息历史有序集合中，用于后续查询
+        // 使用有序集合替代列表，按时间戳排序，确保分页数据一致性
+        const score = historyMsg.timestamp || Date.now();
+
+        // 接收者视角 - 有序集合
+        const receiverZSetKey = `${REDIS_HOT_DATA_PREFIX}${receiverMsgHistoryBaseKey}:zset`;
+        pipeline.zadd(receiverZSetKey, score, messageId);
+        pipeline.expire(receiverZSetKey, HOT_DATA_CACHE_EXPIRY);
+
+        // 发送者视角 - 有序集合
+        const senderZSetKey = `${REDIS_HOT_DATA_PREFIX}${senderMsgHistoryBaseKey}:zset`;
+        pipeline.zadd(senderZSetKey, score, messageId);
+        pipeline.expire(senderZSetKey, HOT_DATA_CACHE_EXPIRY);
 
         const results = await pipeline.exec();
         console.log('[未读消息] 增加未读计数结果:', results);
@@ -331,11 +344,11 @@ const getDataLayerByTimestamp = (timestamp) => {
  * @param {Object} messageData - 消息数据
  * @returns {Promise<Object>} 包含每个成员ID和其未读消息计数的对象
  */
-const incrementGroupUnreadCount = async (groupId, userId, messageData,historyMsg) => {
+const incrementGroupUnreadCount = async (groupId, userId, messageData, historyMsg) => {
     try {
         // 获取群组所有成员
         const group = await Group.findById(groupId).select('members name avatar').lean();
-        console.log('群组信息:', group);
+        // console.log('群组信息:', group);
         if (!group) return {};
 
         const pipeline = redis.pipeline();
@@ -355,6 +368,17 @@ const incrementGroupUnreadCount = async (groupId, userId, messageData,historyMsg
         const hotDataThreshold = now - (HOT_DATA_CACHE_EXPIRY * 1000);
         // 高频数据时间阈值（7天内）
         const freqDataThreshold = now - (FREQUENT_DATA_CACHE_EXPIRY * 1000);
+
+        // 为发送者创建消息历史记录，确保发送者也能查询到自己发送的消息
+        const senderMsgHistoryBaseKey = `group:message:history:${userId}:${groupId}`;
+        const senderMsgHistoryKey = `${REDIS_HOT_DATA_PREFIX}${senderMsgHistoryBaseKey}:${messageId}`;
+        pipeline.set(senderMsgHistoryKey, JSON.stringify(historyMsg), 'EX', HOT_DATA_CACHE_EXPIRY);
+
+        // 将消息ID添加到发送者的消息历史有序集合中
+        const senderZSetKey = `${REDIS_HOT_DATA_PREFIX}${senderMsgHistoryBaseKey}:zset`;
+        const score = historyMsg.timestamp || Date.now();
+        pipeline.zadd(senderZSetKey, score, messageId);
+        pipeline.expire(senderZSetKey, HOT_DATA_CACHE_EXPIRY);
 
         // 为群组中除发送者外的所有成员增加未读计数
         for (const member of group.members) {
@@ -384,12 +408,10 @@ const incrementGroupUnreadCount = async (groupId, userId, messageData,historyMsg
             const msgHistoryKey = `${REDIS_HOT_DATA_PREFIX}${msgHistoryBaseKey}:${messageId}`;
             pipeline.set(msgHistoryKey, JSON.stringify(historyMsg), 'EX', HOT_DATA_CACHE_EXPIRY);
 
-            // 3. 将消息ID添加到消息历史列表中，用于后续查询
-            const historyListKey = `${REDIS_HOT_DATA_PREFIX}${msgHistoryBaseKey}:list`;
-            pipeline.lpush(historyListKey, messageId);
-            pipeline.expire(historyListKey, HOT_DATA_CACHE_EXPIRY);
-            // 限制列表长度，避免过长
-            pipeline.ltrim(historyListKey, 0, 99); // 保留最近100条消息ID
+            // 3. 将消息ID添加到消息历史有序集合中，用于后续查询
+            const memberZSetKey = `${REDIS_HOT_DATA_PREFIX}${msgHistoryBaseKey}:zset`;
+            pipeline.zadd(memberZSetKey, score, messageId);
+            pipeline.expire(memberZSetKey, HOT_DATA_CACHE_EXPIRY);
         }
 
         const results = await pipeline.exec();
@@ -520,7 +542,7 @@ const getUserUnreadMessages = async (userId) => {
             for (let i = 0; i < groupUnreadKeys.length; i++) {
                 const key = groupUnreadKeys[i];
                 const groupId = key.split(':')[3];
-                const count = parseInt(responses[i * 2 ][1] || '0');
+                const count = parseInt(responses[i * 2][1] || '0');
 
                 // 检查热数据是否存在
                 let lastMessage = null;
@@ -625,9 +647,9 @@ const broadcastGroupUnreadUpdate = async (io, socket, groupInfo, senderId, messa
         for (const member of groupInfo.members) {
             const memberId = member.user.toString();
 
-            
+
             // 跳过消息发送者自己
-            if (memberId === senderId.toString()) continue;
+            // if (memberId === senderId.toString()) continue;
             console.log(`[未读消息] 用户 ${memberId} 接收到群组 ${groupId} 的消息,${senderId.toString()}`)
             members.push(memberId);
             // 获取该成员的未读消息计数
@@ -660,8 +682,8 @@ const broadcastGroupUnreadUpdate = async (io, socket, groupInfo, senderId, messa
                 io.to(user.socketId).emit(SocketOnGroupUnreadUpdate, {
                     groupId,
                     unreadCount: unreadCount,
-                    groupName:groupInfo.name,
-                    groupImg:groupInfo.avatar,
+                    groupName: groupInfo.name,
+                    groupImg: groupInfo.avatar,
                     ...messageData
                 });
 

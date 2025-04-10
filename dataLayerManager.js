@@ -49,7 +49,7 @@ const processDataDowngrade = async () => {
         console.log(`[数据分层] 发现 ${hotDataKeys.length} 个热数据键`);
 
         if (hotDataKeys.length === 0) return;
-        console.log(`[数据分层] 开始处理 ${hotDataKeys.length} 个热数据键`, hotDataKeys);
+        // console.log(`[数据分层] 开始处理 ${hotDataKeys.length} 个热数据键`, hotDataKeys);
         // 当前时间
         const now = Date.now();
         // 热数据过期阈值（24小时前的时间戳）
@@ -60,7 +60,7 @@ const processDataDowngrade = async () => {
 
         // 获取所有热数据
         for (const key of hotDataKeys) {
-            console.log(`[数据分层] 获取热数据 ${key}`)
+            // console.log(`[数据分层] 获取热数据 ${key}`)
             pipeline.get(key);
         }
 
@@ -304,6 +304,7 @@ const storeMessageToDataLayer = async (baseKey, data) => {
  * 获取消息历史记录
  * 按照数据分层策略从不同的缓存层获取消息历史
  * 使用Sorted Set替代List，确保分页数据一致性
+ * 支持从发送者和接收者两个视角查询完整聊天记录
  * @param {String} userId - 用户ID
  * @param {String} chatId - 聊天ID（可能是用户ID或群组ID）
  * @param {Boolean} isGroup - 是否为群组消息
@@ -327,14 +328,22 @@ const getMessageHistory = async (userId, chatId, isGroup = false, limit = 20, pa
             };
         const total = await collection.countDocuments(query);
 
-        // 构造消息历史列表键名
-        const baseKey = isGroup
-            ? `group:message:history:${userId}:${chatId}`
-            : `message:history:${userId}:${chatId}`;
+        // 构造消息历史列表键名 - 双向索引，同时支持发送者和接收者视角
+        // 对于私聊，我们需要两个键：一个是当前用户视角，一个是对方视角
+        let baseKeys = [];
+        if (isGroup) {
+            baseKeys.push(`group:message:history:${userId}:${chatId}`);
+        } else {
+            // 为私聊创建双向索引，确保无论从哪个用户视角都能查询到完整聊天记录
+            baseKeys.push(`user:message:history:${userId}:${chatId}`);
+            // 添加对方视角的键，确保发送者也能查询到自己发送的消息
+            baseKeys.push(`user:message:history:${chatId}:${userId}`);
+        }
 
-        // 使用有序集合替代列表，确保分页数据一致性
-        const hotZSetKey = `${REDIS_HOT_DATA_PREFIX}${baseKey}:zset`;
-        const freqZSetKey = `${REDIS_FREQUENT_DATA_PREFIX}${baseKey}:zset`;
+        // 使用主键（当前用户视角）检查缓存
+        const primaryBaseKey = baseKeys[0];
+        const hotZSetKey = `${REDIS_HOT_DATA_PREFIX}${primaryBaseKey}:zset`;
+        const freqZSetKey = `${REDIS_FREQUENT_DATA_PREFIX}${primaryBaseKey}:zset`;
         console.log(`Hot zset key: ${hotZSetKey}`);
 
         // 检查Redis中是否有缓存的消息ID
@@ -357,24 +366,27 @@ const getMessageHistory = async (userId, chatId, isGroup = false, limit = 20, pa
                 return { messages: [], total };
             }
 
-            // 将消息缓存到Redis
+            // 将消息缓存到Redis - 为所有视角创建缓存
             const pipeline = redis.pipeline();
 
             for (const msg of messages) {
                 // 使用消息时间戳作为分数
                 const score = new Date(msg.sentAt).getTime();
-                // 缓存消息内容
-                const msgKey = `${REDIS_HOT_DATA_PREFIX}${baseKey}:${msg._id}`;
-                pipeline.set(msgKey, JSON.stringify(msg), 'EX', HOT_DATA_CACHE_EXPIRY);
 
-                // 将消息ID添加到有序集合
-                pipeline.zadd(hotZSetKey, score, msg._id.toString());
+                // 为每个视角缓存消息
+                for (const baseKey of baseKeys) {
+                    // 缓存消息内容
+                    const msgKey = `${REDIS_HOT_DATA_PREFIX}${primaryBaseKey}:${msg._id}`;
+                    pipeline.set(msgKey, JSON.stringify(msg), 'EX', HOT_DATA_CACHE_EXPIRY);
+
+                    // 将消息ID添加到有序集合
+                    const zsetKey = `${REDIS_HOT_DATA_PREFIX}${baseKey}:zset`;
+                    pipeline.zadd(zsetKey, score, msg._id.toString());
+                    pipeline.expire(zsetKey, HOT_DATA_CACHE_EXPIRY);
+                }
 
                 messageIds.push(msg._id.toString());
             }
-
-            // 设置有序集合过期时间
-            pipeline.expire(hotZSetKey, HOT_DATA_CACHE_EXPIRY);
 
             await pipeline.exec();
             console.log(`[数据分层] 已从MongoDB获取并缓存${messages.length}条消息`);
@@ -420,7 +432,7 @@ const getMessageHistory = async (userId, chatId, isGroup = false, limit = 20, pa
                     // 使用消息时间戳作为分数
                     const score = new Date(msg.sentAt).getTime();
                     // 缓存消息内容
-                    const msgKey = `${REDIS_HOT_DATA_PREFIX}${baseKey}:${msg._id}`;
+                    const msgKey = `${REDIS_HOT_DATA_PREFIX}${primaryBaseKey}:${msg._id}`;
                     pipeline.set(msgKey, JSON.stringify(msg), 'EX', HOT_DATA_CACHE_EXPIRY);
 
                     // 将消息ID添加到有序集合
@@ -446,9 +458,9 @@ const getMessageHistory = async (userId, chatId, isGroup = false, limit = 20, pa
         // 按照消息ID从各层获取消息内容
         for (const msgId of messageIds) {
             // 尝试从热数据层获取
-            const hotKey = `${REDIS_HOT_DATA_PREFIX}${baseKey}:${msgId}`;
-            const freqKey = `${REDIS_FREQUENT_DATA_PREFIX}${baseKey}:${msgId}`;
-            const coldKey = `${REDIS_COLD_DATA_PREFIX}${baseKey}:${msgId}`;
+            const hotKey = `${REDIS_HOT_DATA_PREFIX}${primaryBaseKey}:${msgId}`;
+            const freqKey = `${REDIS_FREQUENT_DATA_PREFIX}${primaryBaseKey}:${msgId}`;
+            const coldKey = `${REDIS_COLD_DATA_PREFIX}${primaryBaseKey}:${msgId}`;
 
             // 按优先级依次检查各数据层
             const hotData = await redis.get(hotKey);
@@ -487,15 +499,21 @@ const getMessageHistory = async (userId, chatId, isGroup = false, limit = 20, pa
             }
         }
 
-        // 按时间戳排序
-        messages.sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime());
+        // 按时间戳排序（降序，最新的消息在前面）
+        messages.sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
+        
+        // 过滤已删除的消息，替换为提示文本
+        const filteredMessages = filterDeletedMessages(messages, userId);
 
-        return { messages, total };
+        return { messages: filteredMessages, total };
     } catch (error) {
         console.error('[数据分层] 获取消息历史记录错误:', error);
         return { messages: [], total: 0 };
     }
 };
+
+// 导入消息删除模块
+const { filterDeletedMessages } = require('./messageDelete');
 
 module.exports = {
     initDataLayerManager,

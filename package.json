@@ -4,7 +4,8 @@
     "ioredis": "^5.4.2",
     "mongoose": "^8.13.1",
     "multer": "1.4.5-lts.2",
-    "nodemon": "^3.1.9"
+    "nodemon": "^3.1.9",
+    "sharp": "^0.34.1"
   },
   "scripts": {
     "chat": "nodemon chat/index.js"

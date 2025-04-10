@@ -99,6 +99,10 @@ const getPrivateList = async (userId) => {
         lastMessage: {
           _id: '$lastMessage._id',
           content: '$lastMessage.content',
+          mediaUrl: '$lastMessage.mediaUrl',
+          thumbnailUrl: '$lastMessage.thumbnailUrl',
+          mediaDuration: '$lastMessage.mediaDuration',
+          locationData: '$lastMessage.locationData',
           type: '$lastMessage.type',
           sentAt: '$lastMessage.sentAt',
           isFromMe: { $eq: ['$lastMessage.sender', new mongoose.Types.ObjectId(userId)] },
@@ -261,6 +265,10 @@ const getGroupList = async (userId) => {
               content: 1,
               type: 1,
               sentAt: 1,
+              mediaUrl: 1,
+              thumbnailUrl: 1,
+              mediaDuration: 1,
+              locationData: 1,
               sender_id: '$sender._id',
               sender_name: '$sender.name',
               _id: 1
@@ -492,7 +500,7 @@ const getChatList = async (req, res,next) => {
       const senderId = chat._id.toString();
       const privateUnread = unreadMessages.private.find(item => item?.lastMessage?.senderId === senderId);
       let newUnread = {}
-      if(privateUnread){
+      if(privateUnread){ 
         newUnread = {
           userId, //被聊天者id
           unreadCount: privateUnread.unreadCount,
@@ -508,7 +516,7 @@ const getChatList = async (req, res,next) => {
               senderImg: chat.img,
               isRead:true,
               senderId:chat.lastMessage.receiverId,
-              ...selectType(chat.type,chat.lastMessage),
+              ...selectType(chat.lastMessage.type,chat.lastMessage),
               sentAt: chat.lastMessage.sentAt,
           }
         }

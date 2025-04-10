@@ -189,7 +189,7 @@ module.exports = (httpServer, core) => {
                 console.error('群消息发送错误:', e);
             }
         });
-
+        // hot:group:message:history:67ed6eef2cb648c8bea90cea:67edee65b9b54f26eca9d205
         //todo 加入群组
         socket.on(SocketEmitGroupJoin, async ({ groupId, userId }) => {
             try {

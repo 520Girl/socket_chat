@@ -79,6 +79,19 @@ const groupMessageSchema = new mongoose.Schema({
     isRead: {
         type: Boolean,
         default: false // 消息是否已读
+    },
+    isDeleted: {
+        type: Boolean,
+        default: false // 消息是否已删除（软删除标记）
+    },
+    deletedAt: {
+        type: Date,
+        default: null // 删除时间
+    },
+    deletedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null // 执行删除操作的用户
     }
 });
 // 存储私聊消息记录
@@ -114,6 +127,19 @@ const privateMessageSchema = new mongoose.Schema({
     isRead: {
         type: Boolean,
         default: false // 消息是否已读
+    },
+    isDeleted: {
+        type: Boolean,
+        default: false // 消息是否已删除（软删除标记）
+    },
+    deletedAt: {
+        type: Date,
+        default: null // 删除时间
+    },
+    deletedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null // 执行删除操作的用户
     }
 });
 

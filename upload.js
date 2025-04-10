@@ -7,12 +7,14 @@ const router = express.Router();
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const sharp = require('sharp');
+const baseUrl = "http://localhost:3008"
 
 // 配置存储
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const mediaType = req.body.mediaType || 'misc';
-        const dir = path.join(__dirname, '../uploads', mediaType);
+        const dir = path.join(__dirname, 'uploads', mediaType);
         
         // 确保目录存在
         if (!fs.existsSync(dir)) {
@@ -31,6 +33,7 @@ const storage = multer.diskStorage({
 // 文件类型过滤
 const fileFilter = (req, file, cb) => {
     const mediaType = req.body.mediaType;
+    console.log(`mediaType: ${mediaType}`,file)
     
     if (mediaType === 'image') {
         // 允许的图片类型
@@ -69,24 +72,46 @@ router.post('/upload', upload.single('media'), async (req, res) => {
                 msg: '没有文件上传'
             });
         }
-
-        // 处理缩略图（如果是图片）
-        let thumbnailUrl = null;
-        if (req.body.mediaType === 'image') {
-            // 这里可以使用sharp等库生成缩略图
-            // 简单实现，实际项目中应该使用图像处理库
-            thumbnailUrl = `/uploads/${req.body.mediaType}/thumbnails/${req.file.filename}`;
-        }
+        console.log(req.file);
 
         // 返回文件URL
         const mediaUrl = `/uploads/${req.body.mediaType}/${req.file.filename}`;
+        let data = {};
+        if (req.body.mediaType === 'image') {
+            // 这里可以使用sharp等库生成缩略图
+            const thumbnailDir = path.join(__dirname, 'uploads', req.body.mediaType, 'thumbnails');
+            if (!fs.existsSync(thumbnailDir)) {
+                fs.mkdirSync(thumbnailDir, { recursive: true });
+            }
+             // 设置缩略图完整路径
+             const thumbnailPath = path.join(thumbnailDir, req.file.filename);
+            // 生成缩略图
+            await sharp(req.file.path)
+                .resize(200, 200, {
+                    fit: 'cover',
+                    position: 'center'
+                })
+                .toFile(thumbnailPath);
+            // 简单实现，实际项目中应该使用图像处理库
+            thumbnailUrl = `/uploads/${req.body.mediaType}/thumbnails/${req.file.filename}`;
+            data ={
+                mediaUrl:`${baseUrl}${mediaUrl}`,
+                thumbnailUrl:`${baseUrl}${thumbnailUrl}`,
+            }    
+        }else if (req.body.mediaType === 'audio') {
+            data = {
+                mediaUrl:`${baseUrl}${mediaUrl}`,
+                mediaDuration: req.body.duration,
+            }
+        }
+
+        
         
         return res.status(200).json({
             code: 20100,
             status: 1,
             data: {
-                mediaUrl,
-                thumbnailUrl,
+                ...data,
                 originalName: req.file.originalname,
                 size: req.file.size,
                 mimetype: req.file.mimetype
